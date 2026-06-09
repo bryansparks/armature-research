@@ -1,0 +1,32 @@
+[project]
+name = "research-analyst"
+version = "0.1.0"
+description = "Deep-dive research analyst powered by Armature — showcases fan-out, continuation, triggers, and structured output"
+requires-python = ">=3.11"
+authors = [
+    { name = "Bryan Sparks", email = "bryan@drycanyon.com" },
+]
+dependencies = [
+    "armature>=0.2.0",
+    "tavily-python>=0.5",   # web search + URL extraction (set TAVILY_API_KEY)
+    "python-dotenv>=1.0",   # loads TAVILY_API_KEY and OPENROUTER_API_KEY from .env
+    "markdown>=3.5",        # HTML report rendering
+    "pypdf>=4.0",           # optional: PDF document ingestion
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "anyio[trio]>=4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["research"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+anyio_mode = "auto"
