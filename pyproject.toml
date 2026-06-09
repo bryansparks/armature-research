@@ -17,7 +17,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4",
+    "pytest-asyncio>=0.23",
     "anyio[trio]>=4.0",
+]
+social = [
+    "praw>=7.7",                      # Reddit search (set REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET)
+    "youtube-transcript-api>=0.6",    # YouTube transcripts (no API key needed)
 ]
 
 [build-system]
@@ -29,4 +34,4 @@ packages = ["research"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-anyio_mode = "auto"
+asyncio_mode = "auto"

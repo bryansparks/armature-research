@@ -30,6 +30,21 @@ model_tiers:
     temperature: 0.3
     max_tokens: 16000
 
+# ── Optional: Perplexity (real-time web search built into the LLM) ────────────
+# If you have a Perplexity API account (https://api.perplexity.ai), uncomment
+# this tier and change synthesize_intel's model_tier to "perplexity".
+# This collapses the Tavily search → synthesize chain into a single LLM call
+# with Perplexity's freshness index — especially valuable for competitive intel
+# where you need the most current pricing, messaging, and news data.
+#
+# perplexity:
+#   provider: openai
+#   base_url: https://api.perplexity.ai
+#   model: sonar-pro
+#   api_key_env: PERPLEXITY_API_KEY
+#   temperature: 0.2
+#   max_tokens: 8000
+
 role_type_defaults:
   worker: small
   orchestrator: medium
@@ -64,8 +79,18 @@ triggers:
     path: /webhook/competitive-intel   # POST {your_company, competitors} to trigger on-demand
 
 # ── Tools ────────────────────────────────────────────────────────────────────────
+# research/tools/web.py    — web_search, fetch_url, generate_html_report
+# research/tools/social.py — search_reddit, search_youtube_videos, fetch_youtube_transcript
+#
+# Reddit: set REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET (see README for setup).
+#   For competitive intel, Reddit surfaces real user comparisons, pricing complaints,
+#   feature requests, and competitor-vs-competitor debates that press releases omit.
+# YouTube: pip install youtube-transcript-api (no API key needed).
+#   Captures product keynotes, demo videos, and conference talks about competitors.
+# Both tools degrade gracefully — workflow runs with web-only data if not configured.
 tools:
   - module: research.tools.web
+  - module: research.tools.social
 
 # ── Stages ───────────────────────────────────────────────────────────────────────
 stages:
@@ -141,15 +166,69 @@ stages:
         query: "{{ search_item.query }}"
         max_results: 5
 
+  # ── 2b. Search Reddit for competitor discussions ─────────────────────────────
+  # Reddit surfaces what users actually think: "X vs Y" comparison threads,
+  # pricing complaints, feature requests, and competitor-vs-competitor debates
+  # that formal press coverage never captures. High signal for competitive intel.
+  # Degrades gracefully if REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET not configured.
+  - id: run_reddit_intel
+    depends_on: [plan_searches]
+    fan_out: 10
+    fan_in: list
+    fail_as_value: true
+    partition_source: "{{ plan_searches.searches }}"
+    partition_key: search_item
+    signature:
+      input:
+        search_item: One search item with competitor, query, intent, category fields
+    tool_call:
+      name: search_reddit
+      args:
+        query: "{{ search_item.query }}"
+        max_results: 5
+
+  # ── 2c. Find competitor product videos ────────────────────────────────────────
+  # Discovers product demo videos, keynote presentations, founder talks, and
+  # conference sessions about competitors — content that reveals roadmap hints
+  # and positioning in ways that landing pages don't.
+  # Degrades gracefully if TAVILY_API_KEY not set or youtube-transcript-api not installed.
+  - id: find_competitor_videos
+    depends_on: [plan_searches]
+    fail_as_value: true
+    tool_call:
+      name: search_youtube_videos
+      args:
+        queries: "{{ plan_searches.searches }}"
+        max_per_query: 2
+        max_total: 6
+
+  - id: fetch_competitor_transcripts
+    depends_on: [find_competitor_videos]
+    fan_out: 6
+    fan_in: list
+    fail_as_value: true
+    partition_source: "{{ find_competitor_videos.videos }}"
+    partition_key: video_item
+    signature:
+      input:
+        video_item: YouTube video object with url, video_id, title, snippet
+    tool_call:
+      name: fetch_youtube_transcript
+      args:
+        url: "{{ video_item.url }}"
+        max_chars: 5000
+
   # ── 3. Synthesize competitor intelligence profiles ────────────────────────────
   - id: synthesize_intel
-    depends_on: [run_searches]
+    depends_on: [run_searches, run_reddit_intel, fetch_competitor_transcripts]
     signature:
       input:
         your_company: Your company name
         your_description: Optional description of what you offer
         plan_searches: Search plan with competitor names and query intents
-        run_searches: All search results
+        run_searches: All web search results
+        run_reddit_intel: Reddit discussion results (each item has query + results array; empty means credentials not configured)
+        fetch_competitor_transcripts: YouTube video transcripts from competitor videos (may be _failed)
         prior_intel: Last week's competitor profiles (absent on first run)
     role:
       name: IntelSynthesizer
@@ -162,7 +241,20 @@ stages:
         {% if your_description %}What you do: {{ your_description }}{% endif %}
         Competitors: {{ plan_searches.competitor_names }}
 
-        Search results (all queries): {{ run_searches }}
+        Web search results (all queries): {{ run_searches }}
+
+        {% if run_reddit_intel is defined and run_reddit_intel %}
+        Reddit community intelligence: {{ run_reddit_intel }}
+        Use Reddit as authentic user signal — real pricing complaints, "which tool is better"
+        comparisons, feature requests, and candid reviews. Only use entries with non-empty
+        results arrays. Weight high-score posts from relevant subreddits most heavily.
+        {% endif %}
+
+        {% if fetch_competitor_transcripts is defined and fetch_competitor_transcripts and not fetch_competitor_transcripts._failed %}
+        Competitor video content (transcripts): {{ fetch_competitor_transcripts }}
+        Use video transcripts for: roadmap hints from keynotes, feature emphasis in demos,
+        positioning language from founder talks. Only use entries with non-empty transcripts.
+        {% endif %}
 
         For EACH competitor, produce a structured profile:
         - pricing: tiers, specific price points, active discounts or promotions
