@@ -153,7 +153,7 @@ stages:
             type: object
             required: [index, question, rationale, source_type]
             properties:
-              index:       {type: integer}
+              index:       {type: number}
               question:    {type: string}
               rationale:   {type: string}
               source_type: {type: string, enum: [web, academic, news, official, data]}
@@ -462,7 +462,7 @@ stages:
               question:               {type: string}
               answer:                 {type: string}
               confidence:             {type: string, enum: [high, medium, low]}
-              supporting_source_count: {type: integer}
+              supporting_source_count: {type: number}
         key_themes:
           type: array
           items: {type: string}
@@ -475,7 +475,7 @@ stages:
         key_data_points:
           type: array
           items: {type: string}
-        source_count: {type: integer}
+        source_count: {type: number}
     on_fail:
       loop:
         stage: synthesize_findings
@@ -569,8 +569,8 @@ stages:
       required: [report, word_count, source_count]
       properties:
         report:       {type: string}
-        word_count:   {type: integer}
-        source_count: {type: integer}
+        word_count:   {type: number}
+        source_count: {type: number}
 
   # ── 11. Validate the report for quality, accuracy, and completeness ───────────
   - id: validate_report
