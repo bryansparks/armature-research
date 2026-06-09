@@ -1,0 +1,527 @@
+name: competitive-intel
+version: "1.0"
+description: "Weekly competitive intelligence monitor — tracks competitor pricing, messaging, and moves, then generates specific actionable recommendations for your product."
+mission: >
+  You are a senior competitive intelligence analyst and strategic advisor. Your job is not
+  to describe what competitors are doing — it is to tell your client exactly what to DO
+  about it. Every recommendation must be grounded in a specific observed competitor action
+  and must be concrete enough to assign to a person with a due date.
+
+# ── Model configuration ──────────────────────────────────────────────────────────
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+
+  medium:
+    provider: openrouter
+    model: minimax/minimax-m2.7
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 8192
+
+  large:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.3
+    max_tokens: 16000
+
+role_type_defaults:
+  worker: small
+  orchestrator: medium
+  judge: large
+  researcher: large
+
+# ── Contract ─────────────────────────────────────────────────────────────────────
+contracts:
+  inputs:
+    - name: your_company      # Your company or product name (required)
+    - name: your_description  # Optional: 1–2 sentences on what you do / who you serve
+    - name: competitors       # Comma-separated competitor names (required)
+    - name: focus             # Optional: specific angle — e.g. "pricing" or "messaging"
+    - name: run_id            # Injected by harness at runtime
+    - name: prior_intel       # Injected by continuation block (absent on first run)
+  max_llm_calls: 200
+  max_iterations: 50
+  timeout_hours: 1.0
+
+checkpoint: true   # resume interrupted runs from last completed stage
+
+# ── Continuation: carry forward prior week's intelligence for delta analysis ──────
+continuation:
+  carry_forward:
+    - key: synthesize_intel.profiles           # competitor positions last week
+    - key: generate_recommendations.recommendations  # what we recommended last week
+  inject_as: prior_intel
+
+# ── Triggers: run automatically or on-demand ─────────────────────────────────────
+triggers:
+  - type: cron
+    schedule: "0 7 * * 1"              # 7am UTC every Monday morning
+  - type: webhook
+    path: /webhook/competitive-intel   # POST {your_company, competitors} to trigger on-demand
+
+# ── Tools ────────────────────────────────────────────────────────────────────────
+tools:
+  - module: research.tools.web
+
+# ── Stages ───────────────────────────────────────────────────────────────────────
+stages:
+
+  # ── 1. Plan all search queries ────────────────────────────────────────────────
+  - id: plan_searches
+    depends_on: []
+    signature:
+      input:
+        your_company: Your company or product name
+        your_description: Optional description of what you offer
+        competitors: Comma-separated competitor names
+        focus: Optional specific focus area
+    role:
+      name: ResearchPlanner
+      type: orchestrator
+      description: |
+        Plan competitive intelligence searches for {{ your_company }}.
+        {% if your_description %}What {{ your_company }} does: {{ your_description }}{% endif %}
+        {% if focus %}Research focus: {{ focus }}{% endif %}
+
+        Competitors to monitor: {{ competitors }}
+
+        Parse the competitors list into individual names. Generate 4–6 targeted search
+        queries per competitor covering these intelligence categories:
+          - pricing: current tiers, price points, active discounts or promotions
+          - messaging: tagline, value propositions, positioning claims, tone
+          - features: recent launches, product updates, roadmap hints
+          - news: fundraising, partnerships, leadership, press coverage (last 30 days)
+          - campaigns: active marketing campaigns, special offers, events
+
+        Also generate 2–3 queries on {{ your_company }} itself to capture external
+        perception — what customers, analysts, and reviewers say about you.
+
+        Return a flat list of search items plus the parsed competitor names.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [searches, competitor_names]
+      properties:
+        searches:
+          type: array
+          items:
+            type: object
+            required: [competitor, query, intent, category]
+            properties:
+              competitor: {type: string}
+              query:      {type: string}
+              intent:     {type: string}
+              category:   {type: string, enum: [pricing, messaging, features, news, campaigns, own_company]}
+        competitor_names:
+          type: array
+          items: {type: string}
+    on_fail:
+      loop:
+        stage: plan_searches
+        max: 2
+
+  # ── 2. Execute all searches in parallel ───────────────────────────────────────
+  - id: run_searches
+    depends_on: [plan_searches]
+    fan_out: 20
+    fan_in: list
+    fail_as_value: true
+    partition_source: "{{ plan_searches.searches }}"
+    partition_key: search_item
+    signature:
+      input:
+        search_item: One search item with competitor, query, intent, category fields
+    tool_call:
+      name: web_search
+      args:
+        query: "{{ search_item.query }}"
+        max_results: 5
+
+  # ── 3. Synthesize competitor intelligence profiles ────────────────────────────
+  - id: synthesize_intel
+    depends_on: [run_searches]
+    signature:
+      input:
+        your_company: Your company name
+        your_description: Optional description of what you offer
+        plan_searches: Search plan with competitor names and query intents
+        run_searches: All search results
+        prior_intel: Last week's competitor profiles (absent on first run)
+    role:
+      name: IntelSynthesizer
+      type: researcher
+      model_tier: large
+      description: |
+        Synthesize search results into structured competitive intelligence profiles.
+
+        Your company: {{ your_company }}
+        {% if your_description %}What you do: {{ your_description }}{% endif %}
+        Competitors: {{ plan_searches.competitor_names }}
+
+        Search results (all queries): {{ run_searches }}
+
+        For EACH competitor, produce a structured profile:
+        - pricing: tiers, specific price points, active discounts or promotions
+        - messaging: tagline, top 3 value propositions, target customer framing
+        - key_features: most-emphasized product capabilities (by name where possible)
+        - recent_moves: launches, campaigns, or changes from the last 30 days
+        - market_position: premium/budget/enterprise/SMB/developer — who they're targeting
+
+        Also produce a profile of how {{ your_company }} is perceived externally
+        (from your own_company queries).
+
+        {% if prior_intel is defined and prior_intel and prior_intel.profiles is defined %}
+        DELTA ANALYSIS — compare each profile to last week's data:
+        Prior profiles: {{ prior_intel.profiles }}
+        For each competitor, add a changes_from_last_run list noting any shifts in
+        pricing, messaging pivots, new feature announcements, or significant news.
+        {% endif %}
+
+        Quote actual prices, feature names, and campaign copy wherever found.
+        If data is missing for a field, say so explicitly — do not guess.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [profiles, your_company_perception, data_freshness_note]
+      properties:
+        profiles:
+          type: array
+          items:
+            type: object
+            required: [name, pricing, messaging, key_features, recent_moves, market_position]
+            properties:
+              name:                  {type: string}
+              pricing:               {type: object}
+              messaging:             {type: object}
+              key_features:          {type: array, items: {type: string}}
+              recent_moves:          {type: array, items: {type: string}}
+              market_position:       {type: string}
+              changes_from_last_run: {type: array, items: {type: string}}
+        your_company_perception: {type: object}
+        data_freshness_note:     {type: string}
+    on_fail:
+      loop:
+        stage: synthesize_intel
+        max: 2
+
+  # ── 4. Assess competitive position ────────────────────────────────────────────
+  - id: compare_and_score
+    depends_on: [synthesize_intel]
+    signature:
+      input:
+        your_company: Your company name
+        your_description: Optional description of what you offer
+        synthesize_intel: Structured competitor profiles and your external perception
+    role:
+      name: StrategicAnalyst
+      type: judge
+      model_tier: large
+      description: |
+        Perform a structured competitive assessment for {{ your_company }}.
+        {% if your_description %}Context: {{ your_description }}{% endif %}
+
+        Competitor profiles: {{ synthesize_intel.profiles }}
+        External perception of {{ your_company }}: {{ synthesize_intel.your_company_perception }}
+
+        Produce:
+        1. positioning_matrix — where each competitor sits on key dimensions (price tier,
+           target customer segment, product depth); one row per competitor
+        2. your_competitive_strengths — areas where {{ your_company }} has a clear edge
+           based on external perception vs. competitor profiles
+        3. your_competitive_gaps — areas where competitors are meaningfully ahead
+        4. immediate_threats — specific competitor moves that could hurt you right now;
+           include the competitor name and urgency (high/medium/low)
+        5. market_opportunities — gaps none of the competitors are filling well;
+           include urgency and a sentence on why it's an opening
+
+        Be direct and specific. Avoid generic strategic language.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [positioning_matrix, your_competitive_strengths, your_competitive_gaps, immediate_threats, market_opportunities]
+      properties:
+        positioning_matrix:
+          type: array
+          items: {type: object}
+        your_competitive_strengths:
+          type: array
+          items: {type: string}
+        your_competitive_gaps:
+          type: array
+          items: {type: string}
+        immediate_threats:
+          type: array
+          items:
+            type: object
+            required: [threat, competitor, urgency, description]
+            properties:
+              threat:      {type: string}
+              competitor:  {type: string}
+              urgency:     {type: string, enum: [high, medium, low]}
+              description: {type: string}
+        market_opportunities:
+          type: array
+          items:
+            type: object
+            required: [opportunity, urgency, description]
+            properties:
+              opportunity: {type: string}
+              urgency:     {type: string, enum: [high, medium, low]}
+              description: {type: string}
+    on_fail:
+      loop:
+        stage: compare_and_score
+        max: 2
+
+  # ── 5. Generate specific actionable recommendations ───────────────────────────
+  # This is the core differentiator: observation → concrete action → owner-ready tasks
+  - id: generate_recommendations
+    depends_on: [compare_and_score]
+    signature:
+      input:
+        your_company: Your company name
+        your_description: Optional description of what you offer
+        synthesize_intel: Competitor profiles (source of grounding observations)
+        compare_and_score: Competitive assessment with threats and opportunities
+        prior_intel: Last week's recommendations for delta tracking (absent on first run)
+    role:
+      name: StrategicAdvisor
+      type: orchestrator
+      model_tier: large
+      description: |
+        Advise {{ your_company }} based on fresh competitive intelligence.
+        {% if your_description %}What {{ your_company }} does: {{ your_description }}{% endif %}
+
+        Competitive assessment: {{ compare_and_score }}
+        Competitor profiles (for grounding): {{ synthesize_intel.profiles }}
+
+        {% if prior_intel is defined and prior_intel and prior_intel.recommendations is defined %}
+        PRIOR RECOMMENDATIONS (last run — check if still open or superseded):
+        {{ prior_intel.recommendations }}
+        {% endif %}
+
+        Generate 6–10 SPECIFIC, ACTIONABLE recommendations.
+
+        For each recommendation:
+        - observation: quote the specific competitor action (price, feature name, campaign copy,
+          news item) that prompted this — never vague ("they are investing in X")
+        - recommendation: a concrete action to take, stated as a directive ("Launch...",
+          "Update...", "Build...", "Counter with...") — not "consider exploring"
+        - rationale: why this move protects or advances {{ your_company }}'s position
+        - action_items: 2–3 specific tasks a person could put on their to-do list today
+        - timeline: this_week / this_month / this_quarter
+
+        Cover a mix of categories: pricing_response, messaging_update, feature_priority,
+        campaign_idea, partnership_opportunity, defensive_move.
+
+        In executive_summary: lead with the single most urgent thing to do this week.
+        In delta_from_prior: note what's new, what's resolved, what's escalated since last run.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [recommendations, executive_summary, delta_from_prior]
+      properties:
+        recommendations:
+          type: array
+          items:
+            type: object
+            required: [priority, category, observation, recommendation, rationale, action_items, timeline]
+            properties:
+              priority:        {type: string, enum: [high, medium, low]}
+              category:        {type: string}
+              observation:     {type: string}
+              recommendation:  {type: string}
+              rationale:       {type: string}
+              action_items:    {type: array, items: {type: string}}
+              timeline:        {type: string, enum: [this_week, this_month, this_quarter]}
+        executive_summary:  {type: string}
+        delta_from_prior:   {type: string}
+    on_fail:
+      loop:
+        stage: generate_recommendations
+        max: 2
+
+  # ── 6. Validate recommendations for specificity and groundedness ──────────────
+  - id: validate_recommendations
+    depends_on: [generate_recommendations]
+    signature:
+      input:
+        your_company: Your company name
+        generate_recommendations: Recommendations to validate
+        synthesize_intel: Source intel to verify observations against
+    role:
+      name: RecommendationJudge
+      type: judge
+      model_tier: large
+      description: |
+        Review the competitive intelligence recommendations for {{ your_company }}.
+
+        Recommendations: {{ generate_recommendations.recommendations }}
+        Source intel: {{ synthesize_intel.profiles }}
+
+        Check each recommendation against four criteria:
+        1. Grounded — is the observation traceable to actual data in the intel profiles?
+           Flag any "observations" that are invented or vague.
+        2. Specific — is the recommended action concrete enough to assign to a person?
+           "Update our pricing page" passes. "Revisit pricing strategy" fails.
+        3. Non-trivial — does it add value beyond what the company would obviously do anyway?
+        4. Proportionate — is the urgency consistent with the severity of the competitor move?
+
+        Accept if there are at least 5 grounded, specific recommendations.
+        Provide precise rewrite guidance for any that fail.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [accept, confidence, issues, feedback]
+      properties:
+        accept:     {type: boolean}
+        confidence: {type: number, minimum: 0.0, maximum: 1.0}
+        issues:     {type: array, items: {type: string}}
+        feedback:   {type: string}
+    on_fail:
+      loop:
+        stage: validate_recommendations
+        max: 2
+
+  # ── 7. Write the competitive intelligence report ──────────────────────────────
+  - id: write_report
+    depends_on: [validate_recommendations]
+    signature:
+      input:
+        your_company: Your company name
+        your_description: Optional description
+        run_id: Run identifier
+        synthesize_intel: Competitor profiles
+        compare_and_score: Competitive position assessment
+        generate_recommendations: Validated actionable recommendations
+        prior_intel: Prior run data for delta section (absent on first run)
+    role:
+      name: ReportWriter
+      type: worker
+      model_tier: medium
+      description: |
+        Write the competitive intelligence report for {{ your_company }}.
+        {% if your_description %}Context: {{ your_description }}{% endif %}
+        Run ID: {{ run_id }}
+
+        Do NOT include a title heading — the HTML template adds it automatically.
+
+        Structure the report exactly as follows:
+
+        ### Executive Summary
+        2–3 sentences. The most important competitive development this week and the
+        single highest-priority action {{ your_company }} should take immediately.
+
+        ### This Week's Top Actions
+        The 3 highest-priority (high urgency) recommendations in skimmable format.
+        For each: **[Competitor] just [did X]** → **[Your company] should [do Y]** (by: [timeline])
+
+        ### Competitor Profiles
+        One subsection per competitor. For each:
+        #### [Competitor Name]
+        - **Pricing**: tiers and price points; flag any changes from last week
+        - **Messaging**: tagline and top value propositions
+        - **Recent Moves**: what they've done in the last 30 days
+        - **Market Position**: who they're targeting
+
+        ### Full Recommendation Set
+        All recommendations grouped by priority: High → Medium → Low.
+        For each:
+        **[Category] · [Priority] · [Timeline]**
+        *Observed:* [the specific competitor action]
+        *Action:* [your concrete recommendation]
+        *Why it matters:* [rationale]
+        *To-do:*
+        - [action item 1]
+        - [action item 2]
+        - [action item 3]
+
+        ### Competitive Position
+        **Strengths:** [your_competitive_strengths as bullet list]
+        **Gaps to close:** [your_competitive_gaps as bullet list]
+        **Immediate threats:** [immediate_threats with competitor and urgency]
+        **Market opportunities:** [market_opportunities with urgency]
+
+        {% if prior_intel is defined and prior_intel %}
+        ### What Changed Since Last Week
+        {{ generate_recommendations.delta_from_prior }}
+        {% endif %}
+
+        ### Research Metadata
+        - Company monitored: {{ your_company }}
+        - Run ID: {{ run_id }}
+        - Competitors tracked: {{ synthesize_intel.profiles | length }}
+        - Recommendations: {{ generate_recommendations.recommendations | length }}
+        - Data note: {{ synthesize_intel.data_freshness_note }}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [report, word_count, recommendations_count]
+      properties:
+        report:                {type: string}
+        word_count:            {type: integer}
+        recommendations_count: {type: integer}
+
+  # ── 8. Render HTML report ─────────────────────────────────────────────────────
+  - id: generate_html
+    depends_on: [write_report]
+    tool_call:
+      name: generate_html_report
+      args:
+        topic: "{{ your_company | default('Competitive Intelligence') }} — Competitive Intelligence"
+        markdown: "{{ write_report.report }}"
+        run_id: "{{ run_id }}"
+
+  # ── Post-run: self-analysis ───────────────────────────────────────────────────
+  - id: self_analyst
+    post_run: true
+    fail_as_value: true
+    depends_on: []
+    signature:
+      input:
+        your_company: Your company name
+        plan_searches: Search plan
+        synthesize_intel: Competitor profiles generated
+        compare_and_score: Competitive assessment
+        generate_recommendations: Recommendations produced
+        validate_recommendations: Judge assessment
+        write_report: Final report metrics
+    role:
+      name: IntelDirector
+      type: judge
+      model_tier: large
+      description: |
+        Review this competitive intelligence run for {{ your_company }}.
+
+        Searches planned: {{ plan_searches.searches | length }} queries across {{ plan_searches.competitor_names | length }} competitors
+        Competitor profiles: {{ synthesize_intel.profiles | length }} produced
+        Data note: {{ synthesize_intel.data_freshness_note }}
+        Recommendations: {{ generate_recommendations.recommendations | length }} generated
+        Validation: accept={{ validate_recommendations.accept }}, confidence={{ validate_recommendations.confidence }}
+        Issues: {{ validate_recommendations.issues }}
+        Report: {{ write_report.word_count }} words
+
+        Evaluate:
+        1. Search coverage — did queries surface current pricing/messaging, or mostly stale content?
+        2. Intel depth — are competitor profiles specific enough to act on, or generic?
+        3. Recommendation quality — specific and grounded, or vague advice?
+        4. Delta tracking — was the prior-run comparison useful? What should be tracked better?
+        5. Structural improvements — what would make the next run more actionable?
+
+        Return specific, implementable suggestions for query strategy, prompt improvements,
+        and output schema changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [issues, suggestions, confidence, stages_flagged]
+      properties:
+        issues:         {type: array, items: {type: string}}
+        suggestions:    {type: array, items: {type: string}}
+        confidence:     {type: number, minimum: 0.0, maximum: 1.0}
+        stages_flagged: {type: array, items: {type: string}}
