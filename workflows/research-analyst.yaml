@@ -727,7 +727,7 @@ stages:
     tool_call:
       name: generate_html_report
       args:
-        topic: "{{ topic | default('Research Report') }}"
+        topic: "Armature Research Analyst Report"
         markdown: "{{ write_report.report }}"
         run_id: "{{ run_id }}"
 
