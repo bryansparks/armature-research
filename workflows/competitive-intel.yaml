@@ -54,9 +54,13 @@ role_type_defaults:
 # ── Contract ─────────────────────────────────────────────────────────────────────
 contracts:
   inputs:
-    - name: your_company      # Your company or product name (required)
+    - name: your_company      # Required: your company or product name
     - name: your_description  # Optional: 1–2 sentences on what you do / who you serve
-    - name: competitors       # Comma-separated competitor names (required)
+    - name: competitors       # Optional: comma-separated competitor names; if omitted, discovered automatically using 'industry'
+    - name: industry          # Optional (required if competitors not provided): product category for auto-discovery
+                              #   Be specific: "specialty artisan pretzel producers" beats "food"
+                              #   Include channel/geography if relevant: "online DTC specialty pretzel brands national US"
+    - name: location_scope    # Optional: geographic scope for discovery — "national", "regional US", "local" (default: national)
     - name: focus             # Optional: specific angle — e.g. "pricing" or "messaging"
   max_llm_calls: 200
   max_iterations: 50
@@ -95,14 +99,79 @@ tools:
 # ── Stages ───────────────────────────────────────────────────────────────────────
 stages:
 
-  # ── 1. Plan all search queries ────────────────────────────────────────────────
-  - id: plan_searches
+  # ── 0. Discover competitors (skipped when competitors input is provided) ─────────
+  # When you know your competitors, pass them explicitly and this stage is skipped.
+  # When you don't — e.g. a new market entrant, a niche category, or a first run —
+  # this stage uses the 'industry' input to identify who the real players are.
+  # Uses the LLM's knowledge to bootstrap the list; the web search phase (stage 2)
+  # then pulls fresh, current data about whoever is discovered.
+  - id: discover_competitors
     depends_on: []
+    skip_if: "{{ competitors }}"
+    fail_as_value: true
     signature:
       input:
         your_company: Your company or product name
         your_description: Optional description of what you offer
-        competitors: Comma-separated competitor names
+        industry: Industry or product category — be specific (e.g. "specialty artisan pretzel producers national US")
+        location_scope: Geographic scope for discovery
+        focus: Optional focus area
+    role:
+      name: CompetitorDiscoverer
+      type: researcher
+      model_tier: large
+      description: |
+        Identify the key competitors for {{ your_company }} in the {{ industry }} space.
+        {% if your_description %}What {{ your_company }} does: {{ your_description }}{% endif %}
+        Geographic scope: {{ location_scope | default('national') }}
+        {% if focus %}Focus angle: {{ focus }}{% endif %}
+
+        No competitor list was provided — identify who {{ your_company }} should be monitoring.
+
+        Think across three tiers:
+        1. Direct competitors: same product, same customer segment, same channel
+        2. Adjacent competitors: similar product with overlapping customer base
+        3. Emerging players: newer entrants gaining visible traction
+
+        For {{ industry }}, identify 6–10 real, named companies. Include a mix of established
+        national brands, regional leaders, and notable emerging players. Exclude {{ your_company }}.
+
+        For each, note why they're relevant, their market tier (national/regional/local,
+        premium/mass-market), and primary channel (online DTC, retail, wholesale, etc.).
+
+        Be honest about confidence: flag any names you're less certain about so the search
+        phase can verify them.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [names, competitors_detail, discovery_note]
+      properties:
+        names:
+          type: array
+          items: {type: string}
+        competitors_detail:
+          type: array
+          items:
+            type: object
+            required: [name, relevance, tier, channel]
+            properties:
+              name:      {type: string}
+              relevance: {type: string}
+              tier:      {type: string}
+              channel:   {type: string}
+        discovery_note: {type: string}
+
+  # ── 1. Plan all search queries ────────────────────────────────────────────────
+  - id: plan_searches
+    depends_on: [discover_competitors]
+    signature:
+      input:
+        your_company: Your company or product name
+        your_description: Optional description of what you offer
+        competitors: Explicit competitor names (comma-separated) — provided directly or left empty for auto-discovery
+        industry: Industry category used for auto-discovery (present when competitors was not provided)
+        location_scope: Geographic scope
+        discover_competitors: Auto-discovered competitor list (present when competitors was not provided; _skipped when it was)
         focus: Optional specific focus area
     role:
       name: ResearchPlanner
@@ -112,10 +181,15 @@ stages:
         {% if your_description %}What {{ your_company }} does: {{ your_description }}{% endif %}
         {% if focus %}Research focus: {{ focus }}{% endif %}
 
-        Competitors to monitor: {{ competitors }}
+        {% if competitors %}
+        Competitors to monitor (explicit): {{ competitors }}
+        {% elif not discover_competitors._skipped %}
+        Competitors to monitor (auto-discovered in {{ industry }}): {{ discover_competitors.names | join(', ') }}
+        Discovery context: {{ discover_competitors.discovery_note }}
+        Competitor details: {{ discover_competitors.competitors_detail }}
+        {% endif %}
 
-        Parse the competitors list into individual names. Generate 4–6 targeted search
-        queries per competitor covering these intelligence categories:
+        Generate 4–6 targeted search queries per competitor covering these intelligence categories:
           - pricing: current tiers, price points, active discounts or promotions
           - messaging: tagline, value propositions, positioning claims, tone
           - features: recent launches, product updates, roadmap hints
