@@ -196,7 +196,7 @@ stages:
             required: [query, sub_question_index, intent]
             properties:
               query:              {type: string}
-              sub_question_index: {type: integer}
+              sub_question_index: {type: number}
               intent:             {type: string}   # what this query is trying to find
 
   # ── 3. Execute all searches in parallel ───────────────────────────────────────
@@ -264,7 +264,7 @@ stages:
             properties:
               url:                {type: string}
               title:              {type: string}
-              sub_question_index: {type: integer}
+              sub_question_index: {type: number}
               credibility_note:   {type: string}
         coverage_note: {type: string}    # which sub-questions still have thin coverage
 
@@ -351,7 +351,7 @@ stages:
             type: object
             required: [sub_question_index, claim, evidence, certainty]
             properties:
-              sub_question_index: {type: integer}
+              sub_question_index: {type: number}
               claim:     {type: string}
               evidence:  {type: string}
               certainty: {type: string, enum: [established, likely, uncertain, contested]}
@@ -403,7 +403,7 @@ stages:
             type: object
             required: [sub_question_index, claim, evidence, certainty]
             properties:
-              sub_question_index: {type: integer}
+              sub_question_index: {type: number}
               claim:     {type: string}
               evidence:  {type: string}
               certainty: {type: string, enum: [established, likely, uncertain, contested]}
@@ -458,7 +458,7 @@ stages:
             type: object
             required: [sub_question_index, question, answer, confidence, supporting_source_count]
             properties:
-              sub_question_index:     {type: integer}
+              sub_question_index:     {type: number}
               question:               {type: string}
               answer:                 {type: string}
               confidence:             {type: string, enum: [high, medium, low]}
