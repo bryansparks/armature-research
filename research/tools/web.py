@@ -222,7 +222,9 @@ async def _handle_generate_html_report(args: dict[str, Any]) -> dict[str, Any]:
     topic = args.get("topic") or "Research Report"
     if not isinstance(topic, str):
         topic = "Research Report"
-    md = args.get("markdown", "")
+    md = args.get("markdown") or ""
+    if not isinstance(md, str):
+        md = ""
     run_id = args.get("run_id", "unknown")
     report_date = datetime.date.today().strftime("%B %-d, %Y")
 
