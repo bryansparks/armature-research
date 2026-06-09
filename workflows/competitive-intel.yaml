@@ -43,8 +43,6 @@ contracts:
     - name: your_description  # Optional: 1–2 sentences on what you do / who you serve
     - name: competitors       # Comma-separated competitor names (required)
     - name: focus             # Optional: specific angle — e.g. "pricing" or "messaging"
-    - name: run_id            # Injected by harness at runtime
-    - name: prior_intel       # Injected by continuation block (absent on first run)
   max_llm_calls: 200
   max_iterations: 50
   timeout_hours: 1.0
@@ -375,6 +373,7 @@ stages:
 
         Accept if there are at least 5 grounded, specific recommendations.
         Provide precise rewrite guidance for any that fail.
+    fail_as_value: true
     output_mode: guided_json
     output_schema:
       type: object
@@ -391,6 +390,7 @@ stages:
 
   # ── 7. Write the competitive intelligence report ──────────────────────────────
   - id: write_report
+    fail_as_value: true
     depends_on: [validate_recommendations]
     signature:
       input:
@@ -465,11 +465,12 @@ stages:
       required: [report, word_count, recommendations_count]
       properties:
         report:                {type: string}
-        word_count:            {type: integer}
-        recommendations_count: {type: integer}
+        word_count:            {type: number}
+        recommendations_count: {type: number}
 
   # ── 8. Render HTML report ─────────────────────────────────────────────────────
   - id: generate_html
+    fail_as_value: true
     depends_on: [write_report]
     tool_call:
       name: generate_html_report
