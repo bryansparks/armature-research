@@ -35,6 +35,50 @@ from armature.permissions.permissions import PermissionLevel
 from armature.registry.registry import ToolDescriptor, ToolRegistry
 
 
+# ── Low-quality content filtering ─────────────────────────────────────────────
+# Ported from Odysseus's is_low_quality() in src/research_utils.py.
+# Filters out boilerplate (cookie notices, paywalls, copyright footers)
+# BEFORE they reach the LLM extraction stage, saving tokens and preventing
+# hallucinated "findings" from junk content.
+
+LOW_QUALITY_MARKERS = [
+    # Phrases (not bare "cookie"/"copyright") so we catch boilerplate
+    # like consent banners and footers without discarding legitimate findings
+    # that merely discuss cookies or copyright as their subject.
+    "cookie consent",
+    "cookie banner",
+    "cookie notice",
+    "copyright notice",
+    "copyright footer",
+    "all rights reserved",
+    # No-content indicators from extraction
+    "insufficient to",
+    "content is insufficient",
+    "no substantive data",
+    "does not contain",
+    "not relevant to",
+    "no relevant information",
+    "unable to extract",
+    "completely unrelated",
+]
+
+
+def is_low_quality(text: str) -> bool:
+    """Check if fetched content is boilerplate or irrelevant.
+
+    Returns True for cookie notices, paywall blocks, copyright footers,
+    and "no relevant information" pages. Returns False for legitimate
+    content (fail-open on errors).
+    """
+    try:
+        if not isinstance(text, str) or not text:
+            return True
+        low = text.lower()
+        return any(marker in low for marker in LOW_QUALITY_MARKERS)
+    except Exception:
+        return False  # fail open
+
+
 def _tavily_client():
     """Return a TavilyClient, raising clearly if the package or key is missing."""
     try:
@@ -69,6 +113,7 @@ async def _handle_web_search(args: dict[str, Any]) -> dict[str, Any]:
             max_results=max_results,
             search_depth="basic",
             include_answer=False,
+            include_images=True,      # surface thumbnail images for the report
         )
         results = [
             {
@@ -76,6 +121,7 @@ async def _handle_web_search(args: dict[str, Any]) -> dict[str, Any]:
                 "title":   r.get("title", ""),
                 "snippet": r.get("content", ""),   # Tavily calls this "content"
                 "score":   r.get("score", 0.0),
+                "image":   r.get("image", ""),       # thumbnail URL for visual report
             }
             for r in response.get("results", [])
         ]
@@ -104,7 +150,12 @@ async def _handle_fetch_url(args: dict[str, Any]) -> dict[str, Any]:
         if results:
             r = results[0]
             content = (r.get("raw_content") or r.get("content") or "")[:max_chars]
-            return {"url": url, "title": r.get("title", url), "content": content}
+            title = r.get("title", url)
+            # Filter out low-quality content (cookie notices, paywalls, etc.)
+            # before it reaches the LLM extraction stage.
+            if is_low_quality(content[:500]):
+                return {"url": url, "title": title, "content": "", "error": "low_quality_content"}
+            return {"url": url, "title": title, "content": content}
         # Tavily returned no results for this URL (paywall, bot-block, etc.)
         failed = response.get("failed_results", [])
         reason = failed[0].get("error", "no content extracted") if failed else "no content extracted"
@@ -145,97 +196,117 @@ async def _handle_read_document(args: dict[str, Any]) -> dict[str, Any]:
 
 # ── HTML report generation ─────────────────────────────────────────────────────
 
-_HTML_TEMPLATE = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title}</title>
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         max-width: 900px; margin: 40px auto; padding: 0 24px;
-         color: #1a1a1a; line-height: 1.6; }}
-  h1.report-title {{ font-size: 2.4rem; font-weight: 700;
-                     border-bottom: 3px solid #2563eb; padding-bottom: 12px; margin-bottom: 4px; }}
-  .report-date {{ font-size: 0.95rem; color: #6b7280; margin-top: 0; margin-bottom: 2rem; }}
-  h2 {{ font-size: 1.4rem; margin-top: 2.5rem; color: #1d4ed8;
-        border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }}
-  h3 {{ font-size: 1.15rem; margin-top: 1.5rem; }}
-  h4 {{ font-size: 1rem; margin-top: 1.25rem; color: #374151; }}
-  a {{ color: #2563eb; }}
-  code {{ background: #f3f4f6; padding: 1px 4px; border-radius: 3px; font-size: 0.9em; }}
-  pre {{ background: #f3f4f6; padding: 12px; border-radius: 6px; overflow-x: auto; }}
-  blockquote {{ border-left: 3px solid #93c5fd; margin: 0; padding-left: 16px; color: #374151; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; }}
-  th, td {{ border: 1px solid #e5e7eb; padding: 8px 12px; text-align: left; }}
-  th {{ background: #f9fafb; font-weight: 600; }}
-  .recent-section {{ background: #eff6ff; border-left: 4px solid #2563eb;
-                     border-radius: 0 6px 6px 0; padding: 16px 20px; margin: 1.5rem 0; }}
-  .recent-section h2 {{ border: none; padding: 0; margin-top: 0; }}
-  .ref-list {{ list-style: none; padding: 0; }}
-  .ref-list li {{ margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid #e5e7eb; }}
-  .ref-list li:last-child {{ border-bottom: none; margin-bottom: 0; padding-bottom: 0; }}
-  .ref-list .ref-title {{ font-weight: 600; }}
-  .ref-list .ref-desc {{ color: #374151; font-size: 0.9rem; margin-top: 2px; }}
-  .meta {{ font-size: 0.85rem; color: #6b7280; margin-top: 2rem;
-           border-top: 1px solid #e5e7eb; padding-top: 1rem; }}
-</style>
-</head>
-<body>
-<h1 class="report-title">{title}</h1>
-<p class="report-date">Report generated: {report_date} &nbsp;·&nbsp; Run ID: {run_id}</p>
-{body}
-<div class="meta">Generated by Research Analyst · Run ID: {run_id} · {report_date}</div>
-</body>
-</html>
-"""
-
-
-def _markdown_to_html(md: str) -> str:
-    """Convert Markdown to HTML. Uses `markdown` package if available."""
-    try:
-        import markdown
-        return markdown.markdown(md, extensions=["tables", "fenced_code"])
-    except ImportError:
-        pass
-    # Minimal fallback
-    lines = []
-    for line in md.splitlines():
-        if line.startswith("### "):
-            lines.append(f"<h3>{line[4:]}</h3>")
-        elif line.startswith("## "):
-            lines.append(f"<h2>{line[3:]}</h2>")
-        elif line.startswith("# "):
-            lines.append(f"<h1>{line[2:]}</h1>")
-        elif line.startswith(("- ", "* ")):
-            lines.append(f"<li>{line[2:]}</li>")
-        elif line.strip():
-            lines.append(f"<p>{line}</p>")
-        else:
-            lines.append("")
-    return "\n".join(lines)
-
-
 async def _handle_generate_html_report(args: dict[str, Any]) -> dict[str, Any]:
-    import datetime
-    topic = args.get("topic") or "Research Report"
-    if not isinstance(topic, str):
+    from research.tools.reporting import generate_visual_report
+
+    # Topic for the report title and filename.
+    # The Jinja2 template uses {{ topic or Topic or '' }} to handle case-variant
+    # CLI inputs where --input "Topic=..." stores as "Topic" (capital T) while
+    # the YAML references "topic" (lowercase). The or-chain falls through
+    # undefined variables to the available one.
+    topic = args.get("topic")
+    if not isinstance(topic, str) or not topic.strip():
+        topic = None
+    if topic is None:
+        # Fallback: try to extract a title from the report content itself
+        md = args.get("markdown") or ""
+        if isinstance(md, str) and md.strip():
+            from research.tools.reporting import _extract_report_title
+            extracted, _ = _extract_report_title(md, "")
+            if extracted and extracted.lower() not in {
+                "report", "deep research report", "research",
+                "executive summary", "summary", "overview",
+            }:
+                topic = extracted
+    if topic is None:
         topic = "Research Report"
     md = args.get("markdown") or ""
     if not isinstance(md, str):
         md = ""
     run_id = args.get("run_id", "unknown")
-    report_date = datetime.date.today().strftime("%B %-d, %Y")
 
-    # Strip a leading h1/h2 title line if the LLM echoes the topic there —
-    # the template already injects it as a styled h1.
-    lines = md.splitlines()
-    if lines and lines[0].lstrip().startswith(("# ", "## ")):
-        md = "\n".join(lines[1:]).lstrip()
+    # Extract sources list from the workflow context.
+    # Sources may arrive as:
+    #   - [{url, title, image?}] — full objects (from select_sources stage)
+    #   - ["https://...", ...] — flat URL strings (from decide_round.urls_fetched)
+    #   - A string representation of a list (Jinja2 rendering of a Python list)
+    # Normalize all formats into the object format the reporting module expects.
+    import json as _json
+    sources = args.get("sources") or []
+    if isinstance(sources, str):
+        # Jinja2 rendered the list as a string — try to parse it back
+        try:
+            sources = _json.loads(sources)
+        except (_json.JSONDecodeError, ValueError):
+            # Fall back to ast.literal_eval for Python-style lists
+            import ast
+            try:
+                sources = ast.literal_eval(sources)
+            except (ValueError, SyntaxError):
+                sources = []
+    if sources and isinstance(sources, list):
+        if sources and isinstance(sources[0], str):
+            sources = [{"url": u, "title": u} for u in sources if isinstance(u, str)]
+    else:
+        sources = []
 
-    body = _markdown_to_html(md)
-    html = _HTML_TEMPLATE.format(title=topic, body=body, run_id=run_id, report_date=report_date)
+    # Stats dict for the stats bar. Built from flat args since tool_call.args
+    # only renders Jinja2 in top-level string values (not nested dicts).
+    # Individual args: source_count, queries_used, iteration_num.
+    stats = {}
+
+    # URLs Analyzed — from source_count arg
+    source_count_val = args.get("source_count")
+    if source_count_val is not None:
+        try:
+            stats["URLs Analyzed"] = int(source_count_val)
+        except (ValueError, TypeError):
+            pass
+
+    # Queries — from queries_used list (compute length)
+    queries_used_val = args.get("queries_used")
+    if isinstance(queries_used_val, list):
+        stats["Queries"] = len(queries_used_val)
+    elif isinstance(queries_used_val, str):
+        try:
+            parsed = _json.loads(queries_used_val)
+            stats["Queries"] = len(parsed) if isinstance(parsed, list) else 0
+        except (ValueError, TypeError):
+            try:
+                import ast
+                parsed = ast.literal_eval(queries_used_val)
+                stats["Queries"] = len(parsed) if isinstance(parsed, list) else 0
+            except (ValueError, SyntaxError):
+                pass
+
+    # Rounds — from rounds arg (flat integer) or iteration_num (legacy)
+    rounds_val = args.get("rounds")
+    if rounds_val is not None:
+        try:
+            stats["Rounds"] = int(rounds_val)
+        except (ValueError, TypeError):
+            pass
+    else:
+        iteration_num_val = args.get("iteration_num")
+        if iteration_num_val is not None:
+            try:
+                stats["Rounds"] = int(iteration_num_val)
+            except (ValueError, TypeError):
+                pass
+
+    if not stats.get("Search") and run_id:
+        stats["Search"] = "Tavily"
+
+    # Category for report styling: product, comparison, howto, landscape, factcheck, or None
+    category = args.get("category") or None
+
+    html = generate_visual_report(
+        question=topic,
+        report_markdown=md,
+        sources=sources,
+        stats=stats,
+        category=category,
+    )
 
     out_dir = Path("./research-output")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -294,15 +365,22 @@ def register(registry: ToolRegistry) -> None:
     registry.register(ToolDescriptor(
         name="generate_html_report",
         description=(
-            "Convert a Markdown research report to a self-contained HTML file. "
-            "Writes to ./research-output/<topic>_<run_id>.html. "
+            "Convert a Markdown research report to a self-contained HTML file with "
+            "editorial-quality styling: dark/light theme, aurora gradient, hero section, "
+            "TOC sidebar, collapsible sources, print/export toolbar, and category-specific "
+            "formatting. Writes to ./research-output/<topic>_<run_id>.html. "
             "Returns {filename, bytes}."
         ),
         permission=PermissionLevel.WORKSPACE,
         handler=_handle_generate_html_report,
         parameters={
-            "topic":    {"type": "string", "description": "Research topic (page title and filename)"},
-            "markdown": {"type": "string", "description": "Full Markdown report text"},
-            "run_id":   {"type": "string", "description": "Run ID for attribution"},
+            "topic":         {"type": "string",  "description": "Research topic (page title and filename)"},
+            "markdown":      {"type": "string",  "description": "Full Markdown report text"},
+            "run_id":        {"type": "string",  "description": "Run ID for attribution"},
+            "sources":       {"type": "array",   "description": "Source list [{url, title, image?}] or flat URL strings for the collapsible sources panel"},
+            "source_count":  {"type": "integer", "description": "Number of URLs analyzed (for stats bar)"},
+            "queries_used":  {"type": "array",   "description": "List of search queries used (length used for stats bar)"},
+            "rounds":        {"type": "integer",  "description": "Number of research rounds completed (for stats bar)"},
+            "category":      {"type": "string",  "description": "Report category for styling: product, comparison, howto, landscape, factcheck"},
         },
     ))

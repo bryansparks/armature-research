@@ -1,6 +1,30 @@
+# Environment
 .env
+.env.local
+.env.*.local
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Testing
+.pytest_cache/
+.coverage
+
+# Generated output
 research-output/
+
+# Armature sessions
 .armature/
+
+# macOS
+.DS_Store
+
+# Secrets
+*.pem
+*.key

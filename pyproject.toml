@@ -11,6 +11,8 @@ dependencies = [
     "tavily-python>=0.5",   # web search + URL extraction (set TAVILY_API_KEY)
     "python-dotenv>=1.0",   # loads TAVILY_API_KEY and OPENROUTER_API_KEY from .env
     "markdown>=3.5",        # HTML report rendering
+    "nh3>=0.2",             # HTML sanitization for report output
+    "beautifulsoup4>=4.12",  # HTML heading ID injection for TOC anchoring
     "pypdf>=4.0",           # optional: PDF document ingestion
 ]
 

@@ -18,10 +18,10 @@ model_tiers:
 
   medium:
     provider: openrouter
-    model: minimax/minimax-m2.7
+    model: google/gemini-2.5-flash
     api_key_env: OPENROUTER_API_KEY
     temperature: 0.2
-    max_tokens: 8192
+    max_tokens: 16000
 
   large:
     provider: openrouter
@@ -369,6 +369,13 @@ stages:
               changes_from_last_run: {type: array, items: {type: string}}
         your_company_perception: {type: object}
         data_freshness_note:     {type: string}
+        coverage_sufficient:
+          type: boolean
+          description: "True if competitive intelligence is comprehensive enough for actionable recommendations"
+        gaps:
+          type: array
+          items: {type: string}
+          description: "Specific intelligence gaps that need more research"
     on_fail:
       loop:
         stage: synthesize_intel
@@ -438,6 +445,13 @@ stages:
               opportunity: {type: string}
               urgency:     {type: string, enum: [high, medium, low]}
               description: {type: string}
+        coverage_sufficient:
+          type: boolean
+          description: "True if competitive assessment is based on sufficient data"
+        gaps:
+          type: array
+          items: {type: string}
+          description: "Specific intelligence gaps that need more research"
     on_fail:
       loop:
         stage: compare_and_score
@@ -644,6 +658,11 @@ stages:
         topic: "{{ your_company | default('Competitive Intelligence') }} — Competitive Intelligence"
         markdown: "{{ write_report.report }}"
         run_id: "{{ run_id }}"
+        sources: "{{ select_sources.selected_urls if select_sources is defined else [] }}"
+        stats:
+          URLs Analyzed: "{{ plan_searches.searches | length }}"
+          Competitors: "{{ plan_searches.competitor_names | length }}"
+        category: comparison
 
   # ── Post-run: self-analysis ───────────────────────────────────────────────────
   - id: self_analyst

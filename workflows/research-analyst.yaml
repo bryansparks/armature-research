@@ -20,7 +20,7 @@ model_tiers:
 
   medium:
     provider: openrouter
-    model: minimax/minimax-m2.7
+    model: google/gemini-2.5-flash
     api_key_env: OPENROUTER_API_KEY
     temperature: 0.2
     max_tokens: 8192
@@ -30,7 +30,7 @@ model_tiers:
     model: moonshotai/kimi-k2.6
     api_key_env: OPENROUTER_API_KEY
     temperature: 0.3
-    max_tokens: 16000
+    max_tokens: 16384
 
 # ── Optional: Perplexity (real-time web search built into the LLM) ────────────
 # If you have a Perplexity API account (https://api.perplexity.ai), uncomment
@@ -63,9 +63,10 @@ contracts:
     - name: run_id         # Injected by the harness at runtime
     - name: prior_research # Injected by continuation: block (absent on first run)
     - name: _prior_sources # Injected by memory: block (absent on first run)
+    - name: _date_context  # Optional: date string for grounding queries (default: current date)
   max_iterations: 40
-  max_llm_calls: 200
-  timeout_hours: 1.0
+  max_llm_calls: 150
+  timeout_hours: 2.0
 
 checkpoint: true    # resume interrupted scans from the last completed stage
 
@@ -74,9 +75,10 @@ checkpoint: true    # resume interrupted scans from the last completed stage
 # This enables incremental research: "what's new since last week?"
 continuation:
   carry_forward:
-    - key: synthesize_findings.key_themes
-    - key: synthesize_findings.source_count
-    - key: synthesize_findings.coverage_gaps
+    - key: deep_research_round.decide_round.key_themes
+    - key: deep_research_round.decide_round.source_count
+    - key: deep_research_round.decide_round.gaps
+    - key: deep_research_round.decide_round.coverage_score
   inject_as: prior_research
 
 # ── Triggers: automate recurring research topics ────────────────────────────────
@@ -87,11 +89,12 @@ triggers:
     path: /webhook/research   # POST with {"topic": "...", "focus": "..."} to trigger
 
 # ── Memory: remember which sources were already used ───────────────────────────
+# Source deduplication across runs is handled by this memory config.
 memory:
   enabled: true
   capture:
-    - stage: select_sources
-      key: selected_urls
+    - stage: deep_research_round
+      key: decide_round.urls_fetched
       max_entries: 5    # rolling window — deduplicates sources across runs
   inject_as: _prior_sources
 
@@ -154,7 +157,11 @@ stages:
         Break the research topic into specific, answerable sub-questions that together
         provide comprehensive coverage of the subject.
 
-        Topic: {{ topic }}
+        IMPORTANT: Today's date is {{ _date_context | default('June 2026') }}.
+        When queries need a year or refer to "latest", "current", "this year", or "recent",
+        use 2026 or relative wording — never a year inferred from your training data cutoff.
+
+        Topic: {{ topic or Topic }}
         {% if focus %}Focus constraint: {{ focus }}{% endif %}
 
         {% if prior_research is defined and prior_research %}
@@ -174,10 +181,24 @@ stages:
         - "news": recent reporting, press coverage
         - "official": government, regulatory, standards bodies
         - "data": statistics, market sizing, numeric benchmarks
+
+        Also classify the overall research category — this controls how the final
+        report is formatted and styled. Pick the single best fit:
+        - "product": best-of rankings, product reviews, purchase recommendations
+        - "comparison": side-by-side comparison of 2+ options (tools, frameworks, services)
+        - "howto": step-by-step guides, tutorials, how-to instructions
+        - "factcheck": verifying a specific claim, debunking, "is X true?"
+        - "landscape": industry overviews, market analysis, state-of-the-art briefings
+        If uncertain, use "landscape" as the default.
+
+        Define success criteria: what would a complete, high-quality answer to this
+        research question look like? What key aspects must be covered, what data points
+        are essential, and what perspectives cannot be missing? This guides downstream
+        evaluation of research completeness.
     output_mode: guided_json
     output_schema:
       type: object
-      required: [sub_questions, scope_summary]
+      required: [sub_questions, scope_summary, category, success_criteria]
       properties:
         sub_questions:
           type: array
@@ -191,429 +212,79 @@ stages:
               source_type: {type: string, enum: [web, academic, news, official, data]}
         scope_summary:
           type: string    # one paragraph describing what this research will cover
+        category:
+          type: string
+          enum: [product, comparison, howto, factcheck, landscape]
+          description: "Research category that controls report formatting"
+        success_criteria:
+          type: string
+          description: "What a complete answer looks like — key aspects, essential data, required perspectives"
 
-  # ── 2. Generate targeted search queries for each sub-question ─────────────────
-  - id: plan_searches
+  # ── 2. Deep research via iterative subagent ────────────────────────────────────
+  # Runs research-round.yaml as a subagent in a loop. Each iteration performs a
+  # full search→extract→synthesize→decide cycle. The loop continues until coverage
+  # is adequate (continue_research == false) or max_iterations is reached.
+  #
+  # carry_forward passes the judge's evaluation (gaps, themes, coverage score,
+  # and accumulated URLs/queries) into the next iteration so it can:
+  #   - Focus queries on the identified gaps
+  #   - Deduplicate against URLs already fetched
+  #   - Build on themes already established
+  - id: deep_research_round
     depends_on: [decompose_query]
-    signature:
-      input:
-        topic: The research topic
-        decompose_query: Sub-questions and scope summary
-    role:
-      name: SearchPlanner
-      type: worker
-      model_tier: medium
-      description: |
-        Generate 2–3 targeted web search queries for each sub-question.
-
-        Sub-questions: {{ decompose_query.sub_questions }}
-        Topic: {{ topic }}
-
-        Vary query phrasing to surface different perspectives:
-        - One query for primary/authoritative sources
-        - One for recent developments or news
-        - One for critical views, alternatives, or counterpoints
-
-        Avoid queries so broad they return only aggregator pages.
-        Prefer specific noun phrases over conversational questions.
-    output_mode: guided_json
-    output_schema:
-      type: object
-      required: [queries]
-      properties:
-        queries:
-          type: array
-          items:
-            type: object
-            required: [query, sub_question_index, intent]
-            properties:
-              query:              {type: string}
-              sub_question_index: {type: number}
-              intent:             {type: string}   # what this query is trying to find
-
-  # ── 3. Execute all searches in parallel ───────────────────────────────────────
-  # Each search query runs as its own tool call — no LLM overhead.
-  - id: run_searches
-    depends_on: [plan_searches]
-    fan_out: 20
-    fan_in: list
-    partition_source: "{{ plan_searches.queries }}"
-    partition_key: search_item
-    signature:
-      input:
-        search_item: Search query object with query string and intent
-    tool_call:
-      name: web_search
-      args:
-        query: "{{ search_item.query }}"
-        max_results: 6
-
-  # ── 3b. Search Reddit in parallel with web searches ──────────────────────
-  # Surfaces authentic user voices: real product experiences, honest comparisons,
-  # pricing debates, and community consensus that formal web sources often omit.
-  # Degrades gracefully if REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET are not set —
-  # each result will have an empty results array and an error field explaining why.
-  - id: run_reddit_searches
-    depends_on: [plan_searches]
-    fan_out: 10
-    fan_in: list
-    fail_as_value: true
-    partition_source: "{{ plan_searches.queries }}"
-    partition_key: search_item
-    signature:
-      input:
-        search_item: Search query object with query string and intent
-    tool_call:
-      name: search_reddit
-      args:
-        query: "{{ search_item.query }}"
-        max_results: 5
-
-  # ── 3c. Find relevant YouTube videos ─────────────────────────────────────
-  # Discovers conference talks, product demos, founder interviews, and tutorial
-  # content using Tavily site:youtube.com searches. Uses the same queries
-  # generated by plan_searches to stay on-topic.
-  # Requires TAVILY_API_KEY (shared with web_search). Returns a flat video list.
-  - id: find_youtube_videos
-    depends_on: [plan_searches]
-    fail_as_value: true
-    tool_call:
-      name: search_youtube_videos
-      args:
-        queries: "{{ plan_searches.queries }}"
-        max_per_query: 3
-        max_total: 8
-
-  # ── 3d. Fetch transcripts of discovered YouTube videos ────────────────────
-  # Fetches auto-generated captions from each video found in 3c.
-  # No API key required — uses youtube-transcript-api (pip install youtube-transcript-api).
-  # Videos without captions or private videos return an error field and are skipped.
-  # Degrades gracefully if youtube-transcript-api is not installed or no videos were found.
-  - id: fetch_video_transcripts
-    depends_on: [find_youtube_videos]
-    fan_out: 8
-    fan_in: list
-    fail_as_value: true
-    partition_source: "{{ find_youtube_videos.videos }}"
-    partition_key: video_item
-    signature:
-      input:
-        video_item: YouTube video object with url, video_id, title, snippet
-    tool_call:
-      name: fetch_youtube_transcript
-      args:
-        url: "{{ video_item.url }}"
-        max_chars: 6000
-
-  # ── 4. Select the most valuable URLs to read in full ──────────────────────────
-  # Deduplicates across all search results and filters out low-value sources.
-  - id: select_sources
-    depends_on: [run_searches]
-    signature:
-      input:
-        topic: The research topic
-        run_searches: All search results — list of per-query results with URLs, titles, snippets
-        decompose_query: Sub-questions for coverage checking
-        _prior_sources: URLs used in prior runs (from memory — avoid re-fetching)
-    role:
-      name: SourceSelector
-      type: worker
-      model_tier: medium
-      description: |
-        Review all search results and select the most valuable URLs to read in full.
-
-        All search results are in run_searches. Each element is the result of one query:
-        {query: "...", results: [{url, title, snippet}, ...]}
-
-        Topic: {{ topic }}
-        Sub-questions to cover: {{ decompose_query.sub_questions }}
-        {% if _prior_sources is defined and _prior_sources %}
-        Already read in prior runs (skip unless substantially updated): {{ _prior_sources }}
-        {% endif %}
-
-        Selection criteria — apply in order:
-        1. Coverage breadth: ensure at least one source per sub-question
-        2. Source credibility: prefer .gov, .edu, established outlets, primary sources
-        3. Recency: prefer sources from the last 12–18 months when topic is time-sensitive
-        4. Avoid: paywalled articles, thin aggregator pages, SEO-farm content, press releases
-           as the sole source for factual claims, social media posts
-        5. Deduplicate: if two URLs are from the same domain and cover the same angle, keep one
-
-        Select up to {{ max_sources | default(12) }} URLs.
-    output_mode: guided_json
-    output_schema:
-      type: object
-      required: [selected_urls, coverage_note]
-      properties:
-        selected_urls:
-          type: array
-          items:
-            type: object
-            required: [url, title, sub_question_index, credibility_note]
-            properties:
-              url:                {type: string}
-              title:              {type: string}
-              sub_question_index: {type: number}
-              credibility_note:   {type: string}
-        coverage_note: {type: string}    # which sub-questions still have thin coverage
-
-  # ── 5. Fetch full content of each selected URL in parallel ────────────────────
-  - id: fetch_articles
-    depends_on: [select_sources]
-    fan_out: 12
-    fan_in: list
-    fail_as_value: true    # a 404 or paywall shouldn't halt the whole pipeline
-    partition_source: "{{ select_sources.selected_urls }}"
-    partition_key: url_item
-    signature:
-      input:
-        url_item: Selected URL object with url, title, and sub_question_index
-    tool_call:
-      name: fetch_url
-      args:
-        url: "{{ url_item.url }}"
-        max_chars: 12000
-
-  # ── 6. Read provided documents (skipped if no documents input) ────────────────
-  - id: read_documents
-    depends_on: [decompose_query]
-    skip_if: "{{ not documents }}"
-    fail_as_value: true
-    fan_out: 10
-    fan_in: list
-    partition_source: "{{ documents }}"
-    partition_key: doc_path
-    tool_call:
-      name: read_document
-      args:
-        path: "{{ doc_path }}"
-
-  # ── 7. Extract structured findings from each web source in parallel ───────────
-  - id: extract_findings
-    depends_on: [fetch_articles]
-    fan_out: 12
-    fan_in: list
-    fail_as_value: true
-    partition_source: "{{ fetch_articles }}"
-    partition_key: article
-    signature:
-      input:
-        article: Fetched article with url, title, and content fields
-        decompose_query: Sub-questions to extract findings against
-        topic: Research topic
-    role:
-      name: Extractor
-      type: researcher
-      model_tier: large
-      description: |
-        Extract key findings from this source that are relevant to the research topic.
-
-        Source URL: {{ article.url }}
-        Source title: {{ article.title }}
-        Content: {{ article.content }}
-
-        {% if article._failed is defined %}
-        NOTE: This source failed to load. Skip it — return an empty findings array.
-        {% endif %}
-
-        Research topic: {{ topic }}
-        Sub-questions: {{ decompose_query.sub_questions }}
-
-        For each finding:
-        - Identify which sub-question it addresses (use the index)
-        - State the claim precisely — do not paraphrase numbers, dates, or named sources
-        - Quote the supporting evidence or data point from the article
-        - Rate certainty: established (consensus/primary source), likely (corroborated),
-          uncertain (single source or hedged), contested (contradicts other sources)
-
-        Reliability: rate the source as high / medium / low credibility and explain why in one sentence.
-    output_mode: guided_json
-    output_schema:
-      type: object
-      required: [source_url, source_title, findings, reliability]
-      properties:
-        source_url:   {type: string}
-        source_title: {type: string}
-        findings:
-          type: array
-          items:
-            type: object
-            required: [sub_question_index, claim, evidence, certainty]
-            properties:
-              sub_question_index: {type: number}
-              claim:     {type: string}
-              evidence:  {type: string}
-              certainty: {type: string, enum: [established, likely, uncertain, contested]}
-        reliability: {type: string, enum: [high, medium, low]}
-
-  # ── 8. Extract findings from documents (skipped if no documents) ───────────────
-  - id: extract_document_findings
-    depends_on: [read_documents]
-    skip_if: "{{ not documents }}"
-    fan_out: 10
-    fan_in: list
-    fail_as_value: true
-    partition_source: "{{ read_documents }}"
-    partition_key: doc
-    signature:
-      input:
-        doc: Document with filename and content fields
-        decompose_query: Sub-questions
-        topic: Research topic
-    role:
-      name: DocumentExtractor
-      type: researcher
-      model_tier: large
-      description: |
-        Extract key findings from this document.
-
-        Document: {{ doc.filename }}
-        Content: {{ doc.content }}
-
-        {% if doc._failed is defined %}
-        NOTE: This document failed to read. Return an empty findings array.
-        {% endif %}
-
-        Research topic: {{ topic }}
-        Sub-questions: {{ decompose_query.sub_questions }}
-
-        Same extraction format as web sources — claim, evidence, sub_question_index, certainty.
-        Treat the document as a high-reliability source unless the content suggests otherwise.
-    output_mode: guided_json
-    output_schema:
-      type: object
-      required: [source_url, source_title, findings, reliability]
-      properties:
-        source_url:   {type: string}    # use doc filename as URL
-        source_title: {type: string}
-        findings:
-          type: array
-          items:
-            type: object
-            required: [sub_question_index, claim, evidence, certainty]
-            properties:
-              sub_question_index: {type: number}
-              claim:     {type: string}
-              evidence:  {type: string}
-              certainty: {type: string, enum: [established, likely, uncertain, contested]}
-        reliability: {type: string, enum: [high, medium, low]}
-
-  # ── 9. Synthesize all findings into a unified research summary ────────────────
-  - id: synthesize_findings
-    depends_on: [extract_findings, extract_document_findings, run_reddit_searches, fetch_video_transcripts]
-    signature:
-      input:
-        topic: Research topic
-        focus: Optional focus constraint
-        decompose_query: Sub-questions and scope
-        extract_findings: Per-source extracted findings from web articles
-        extract_document_findings: Per-document findings (may be _skipped if no docs)
-        run_reddit_searches: Reddit community discussion results (list of per-query results; results array empty means credentials not configured)
-        fetch_video_transcripts: YouTube video transcripts (may be _failed if not installed or no videos found)
-    role:
-      name: Synthesizer
-      type: orchestrator
-      model_tier: medium
-      description: |
-        Synthesize all research findings into a coherent, structured summary.
-
-        Topic: {{ topic }}
-        {% if focus %}Focus: {{ focus }}{% endif %}
-        Sub-questions: {{ decompose_query.sub_questions }}
-
-        Web source findings: {{ extract_findings }}
-        {% if not extract_document_findings._skipped %}
-        Document findings: {{ extract_document_findings }}
-        {% endif %}
-
-        {% if run_reddit_searches is defined and run_reddit_searches %}
-        Reddit community discussion: {{ run_reddit_searches }}
-        Integrate Reddit findings as authentic user signal: real experiences, comparisons,
-        complaints, and community consensus. Only use entries where the results array is
-        non-empty. Weight Reddit posts by score and recency. Note subreddit context.
-        {% endif %}
-
-        {% if fetch_video_transcripts is defined and fetch_video_transcripts and not fetch_video_transcripts._failed %}
-        YouTube video transcript content: {{ fetch_video_transcripts }}
-        Treat video transcripts as spoken presentations: more contextual and explanatory
-        than written sources. Include the video title when citing. Only use entries where
-        the transcript field is non-empty.
-        {% endif %}
-
-        Your synthesis must:
-        1. Address every sub-question with at minimum a summary answer and confidence level
-        2. Identify the 3–5 most important themes that emerge across sources
-        3. Surface contradictions: where do sources disagree? Which position is better supported?
-        4. Note coverage gaps: which sub-questions had weak or no coverage?
-        5. List the 3 most important quantitative data points found (numbers, dates, percentages)
-        6. Identify any consensus view vs. minority views
-
-        Deduplication rules:
-        - If multiple sources make the same claim, note it once with the count of corroborating sources
-        - Prefer higher-reliability sources when claims conflict
-        - Contested claims must be flagged as such — do not present them as settled
-    output_mode: guided_json
-    output_schema:
-      type: object
-      required: [answers_by_question, key_themes, contradictions, coverage_gaps, key_data_points, source_count]
-      properties:
-        answers_by_question:
-          type: array
-          items:
-            type: object
-            required: [sub_question_index, question, answer, confidence, supporting_source_count]
-            properties:
-              sub_question_index:     {type: number}
-              question:               {type: string}
-              answer:                 {type: string}
-              confidence:             {type: string, enum: [high, medium, low]}
-              supporting_source_count: {type: number}
-        key_themes:
-          type: array
-          items: {type: string}
-        contradictions:
-          type: array
-          items: {type: string}
-        coverage_gaps:
-          type: array
-          items: {type: string}
-        key_data_points:
-          type: array
-          items: {type: string}
-        source_count: {type: number}
-    on_fail:
-      loop:
-        stage: synthesize_findings
-        max: 2
+    subagent_spec: workflows/research-round.yaml
+    loop:
+      max_iterations: 3
+      until: "{{ decide_round.continue_research == false }}"
+      carry_forward:
+        - decide_round.gaps
+        - decide_round.key_themes
+        - decide_round.coverage_score
+        - decide_round.urls_fetched
+        - decide_round.queries_used
+        - decide_round.source_count
+      iteration_var: _iteration
+    output_max_chars: 50000
 
   # ── 10. Write the final research briefing ─────────────────────────────────────
   - id: write_report
-    depends_on: [synthesize_findings]
+    depends_on: [deep_research_round]
     signature:
       input:
         topic: Research topic
         focus: Optional focus constraint
         run_id: Run identifier for citation
-        decompose_query: Sub-questions and scope summary
-        synthesize_findings: Unified research synthesis
-        select_sources: Selected source list with URLs and credibility notes
+        decompose_query: Sub-questions, scope summary, and success criteria
+        deep_research_round: Research subagent output (final iteration) with decide_round containing report, gaps, and coverage
         prior_research: "Prior run summary — absent if this is the first run"
     role:
       name: Writer
       type: worker
-      model_tier: medium
+      model_tier: large
       description: |
         Write a comprehensive research briefing in Markdown.
 
-        Topic: {{ topic }}
+        IMPORTANT LENGTH REQUIREMENT: The report MUST be at least 800 words.
+        Do NOT submit a report under 800 words — if the research data is thin,
+        expand with more detailed evidence, examples, and citations. Do not pad
+        with filler — add substantive content drawn from the research findings.
+
+        CRITICAL: Do NOT truncate your response. Write the COMPLETE report.
+        If you find yourself running out of space, prioritize completing all
+        sections over writing perfect prose. An incomplete report is worse
+        than a slightly rough but complete one.
+
+        Topic: {{ topic or Topic }}
         {% if focus %}Focus: {{ focus }}{% endif %}
         Run ID: {{ run_id }}
 
-        The synthesis is in synthesize_findings. Sources are in select_sources.
+        The research synthesis is in deep_research_round.decide_round.report.
+        Remaining gaps are in deep_research_round.decide_round.gaps.
+        Coverage score: {{ deep_research_round.decide_round.coverage_score }}
 
         ACCURACY RULES — never violate:
         - Every factual claim must be traceable to a source. Use inline citations: [Source Title](url)
-        - Do not invent statistics, dates, or named entities not present in synthesize_findings
+        - Do not invent statistics, dates, or named entities not present in the report
         - Contested claims must be flagged: "According to X, though Y disputes this..."
         - Data points must be quoted exactly as found — do not round or paraphrase numbers
 
@@ -626,6 +297,96 @@ stages:
         Structure the report exactly as follows (do NOT include a title heading — the
         HTML template adds the title automatically):
 
+        {% set report_category = decompose_query.category %}
+
+        {% if report_category == 'product' %}
+        PRODUCT REVIEW FORMAT — structure the report as:
+        ### Executive Summary
+        3–4 sentences. Top pick and key differentiator.
+
+        ### Quick Comparison
+        Side-by-side table with the top options. Columns: Product, Price, Key Strength, Best For.
+
+        ### Detailed Reviews
+        One ### subsection per product. For each: overview, strengths, weaknesses, pricing, and a
+        verdict line (**Best for X** or **Best value for Y**).
+
+        ### Verdict
+        Two picks: **Best Overall** and **Best Value**, each with a one-sentence justification.
+
+        ### Key Findings
+        Numbered list with confidence indicators.
+
+        ### Contradictions and Open Questions
+        Where do sources disagree? What remains unclear?
+
+        ### Appendix: Sources Consulted
+        Organized by credibility tier with inline citations.
+
+        {% elif report_category == 'comparison' %}
+        COMPARISON FORMAT — structure the report as:
+        ### Executive Summary
+        3–4 sentences. The key differentiator and bottom-line recommendation.
+
+        ### At a Glance
+        Comparison table covering all options. Columns: Feature/Aspect, then one column per option.
+
+        ### By Option
+        One ### subsection per option. For each: strengths, weaknesses, ideal use case, pricing.
+
+        ### Head-to-Head
+        For each major comparison dimension, a ### subsection comparing all options side by side.
+
+        ### Verdict
+        **Best For** picks for each major use case (e.g., "Best for teams", "Best for solo devs").
+
+        ### Key Findings and Contradictions
+
+        ### Appendix: Sources Consulted
+
+        {% elif report_category == 'howto' %}
+        HOW-TO GUIDE FORMAT — structure the report as:
+        ### Executive Summary
+        2–3 sentences. What the reader will learn and approximate time required.
+
+        ### Prerequisites
+        What you need before starting: tools, accounts, knowledge, costs.
+
+        ### Quick Guide
+        Numbered steps (5–8 steps) — the concise version for someone who already knows the basics.
+
+        ### Step-by-Step Walkthrough
+        One ### subsection per step. For each: what to do, why, common mistakes (in blockquotes),
+        and pro tips. Use numbered lists within steps.
+
+        ### Troubleshooting
+        Common problems and solutions in a table: Problem | Solution.
+
+        ### Appendix: Sources Consulted
+
+        {% elif report_category == 'factcheck' %}
+        FACT-CHECK FORMAT — structure the report as:
+        ### The Claim
+        State the specific claim being investigated, its origin, and who is making it.
+
+        ### Evidence For
+        Sources and data supporting the claim. Use inline citations.
+
+        ### Evidence Against
+        Sources and data contradicting the claim. Use inline citations.
+
+        ### Verdict
+        One of: **Supported** (strong evidence), **Mixed** (some support, important caveats),
+        **Unsupported** (evidence contradicts), **Inconclusive** (insufficient evidence).
+
+        ### Nuance and Caveats
+        Important context, scope limitations, and edge cases.
+
+        ### Appendix: Sources Consulted
+
+        {% else %}
+        {% set report_category = 'landscape' %}
+        DEFAULT / LANDSCAPE FORMAT — structure the report as:
         ### Executive Summary
         3–4 sentences. What was researched, the single most important finding,
         and the confidence level. Write this for a busy decision maker.
@@ -661,13 +422,15 @@ stages:
 
         #### Medium Credibility
         - **[Article Title](https://...)** — Vendor survey on enterprise adoption rates and ROI expectations.
+        {% endif %}
 
         ### Research Metadata
-        - Topic: {{ topic }}
+        - Topic: {{ topic or Topic }}
         - Run ID: {{ run_id }}
-        - Sources consulted: {{ synthesize_findings.source_count }}
+        - Sources consulted: {{ deep_research_round.decide_round.source_count }}
         - Sub-questions addressed: {{ decompose_query.sub_questions | length }}
-        - Coverage gaps: {{ synthesize_findings.coverage_gaps | join('; ') if synthesize_findings.coverage_gaps else 'None identified' }}
+        - Coverage score: {{ deep_research_round.decide_round.coverage_score }}
+        - Coverage gaps: {{ deep_research_round.decide_round.gaps | join('; ') if deep_research_round.decide_round.gaps else 'None identified' }}
     output_mode: guided_json
     output_schema:
       type: object
@@ -676,6 +439,7 @@ stages:
         report:       {type: string}
         word_count:   {type: number}
         source_count: {type: number}
+    output_max_chars: 16000
 
   # ── 11. Validate the report for quality, accuracy, and completeness ───────────
   - id: validate_report
@@ -684,17 +448,17 @@ stages:
       input:
         topic: Research topic
         write_report: The draft report
-        synthesize_findings: The underlying synthesis to check against
+        deep_research_round: Iterative research subagent output with decide_round containing synthesis
     role:
       name: Editor
       type: judge
-      model_tier: large
+      model_tier: medium
       description: |
         Review this research report before it is delivered.
 
-        Topic: {{ topic }}
+        Topic: {{ topic or Topic }}
         Draft report: {{ write_report.report }}
-        Underlying synthesis: {{ synthesize_findings }}
+        Research synthesis: {{ deep_research_round.decide_round }}
 
         Check for:
         1. Unsupported claims — any assertion not traceable to a source in the synthesis
@@ -722,14 +486,22 @@ stages:
         max: 2
 
   # ── 12. Render the report as a self-contained HTML file ───────────────────────
+  # Note: tool_call.args only renders Jinja2 in top-level string values.
+  # Nested dict values are NOT rendered, so stats must be passed as flat
+  # individual args and assembled in the handler.
   - id: generate_html
     depends_on: [validate_report]
     tool_call:
       name: generate_html_report
       args:
-        topic: "Armature Research Analyst Report"
+        topic: "{{ topic or Topic or '' }}"
         markdown: "{{ write_report.report }}"
         run_id: "{{ run_id }}"
+        sources: "{{ deep_research_round.decide_round.urls_fetched }}"
+        source_count: "{{ deep_research_round.decide_round.source_count }}"
+        queries_used: "{{ deep_research_round.decide_round.queries_used }}"
+        rounds: "{{ deep_research_round.decide_round.iteration_num }}"
+        category: "{{ decompose_query.category }}"
 
   # ── Post-run: self-analysis of research quality ───────────────────────────────
   # Runs after all normal stages complete, with access to the full run transcript.
@@ -741,29 +513,28 @@ stages:
     signature:
       input:
         topic: Research topic
-        plan_searches: Search queries that were generated
-        select_sources: Sources selected and coverage note
-        synthesize_findings: The unified synthesis output
+        deep_research_round: Iterative research subagent output
         validate_report: Editor's quality assessment of the report
         write_report: Final report with word count and source count
     role:
       name: ResearchDirector
       type: judge
-      model_tier: large
+      model_tier: medium
       description: |
         You are reviewing a completed research run to identify quality improvements.
 
-        Topic: {{ topic }}
-        Search queries used: {{ plan_searches.queries }}
-        Sources selected: {{ select_sources.selected_urls | length }} sources; coverage note: {{ select_sources.coverage_note }}
-        Synthesis: {{ synthesize_findings.key_themes }} | Gaps: {{ synthesize_findings.coverage_gaps }}
+        Topic: {{ topic or Topic }}
+        Coverage score: {{ deep_research_round.decide_round.coverage_score }}
+        Remaining gaps: {{ deep_research_round.decide_round.gaps }}
+        Key themes: {{ deep_research_round.decide_round.key_themes }}
+        Sources consulted: {{ deep_research_round.decide_round.source_count }}
         Editor assessment: accept={{ validate_report.accept }}, confidence={{ validate_report.confidence }}, issues={{ validate_report.issues }}
         Report: {{ write_report.word_count }} words, {{ write_report.source_count }} sources cited
 
         Evaluate:
-        1. Search quality — did the queries surface high-value sources, or were results shallow?
-        2. Source selection — were the right URLs chosen? Any obvious gaps in the coverage note?
-        3. Synthesis depth — did the synthesizer surface non-obvious connections, or just list facts?
+        1. Research depth — did multiple iterations meaningfully improve coverage, or were later rounds redundant?
+        2. Source quality — were the right URLs chosen? Any obvious gaps?
+        3. Synthesis depth — did the iterative approach surface non-obvious connections?
         4. Report quality — what did the editor flag? Is the acceptance confidence high or low?
         5. Structural improvements — what would make the next run produce a better briefing?
 
