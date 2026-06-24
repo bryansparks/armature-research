@@ -22,6 +22,12 @@ research-output/
 # Armature sessions
 .armature/
 
+# Claude Code local state
+.claude/
+
+# Generated HTML reports in repo root
+/*.html
+
 # macOS
 .DS_Store
 

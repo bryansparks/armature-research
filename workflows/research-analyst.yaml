@@ -9,7 +9,7 @@ mission: >
 # ── Model configuration ─────────────────────────────────────────────────────────
 # Swap providers/models here without touching any stage definitions.
 # All three tiers are used: small for cheap planning, large for extraction,
-# frontier for synthesis and final report writing.
+# large for synthesis and final report writing.
 model_tiers:
   small:
     provider: openrouter
@@ -20,14 +20,14 @@ model_tiers:
 
   medium:
     provider: openrouter
-    model: google/gemini-2.5-flash
+    model: moonshotai/kimi-k2.7
     api_key_env: OPENROUTER_API_KEY
     temperature: 0.2
     max_tokens: 8192
 
   large:
     provider: openrouter
-    model: moonshotai/kimi-k2.6
+    model: z-ai/glm-5.2
     api_key_env: OPENROUTER_API_KEY
     temperature: 0.3
     max_tokens: 16384

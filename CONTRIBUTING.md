@@ -1,4 +1,4 @@
-# Contributing to Research-Project
+# Contributing to Research-Analyst
 
 Thanks for your interest! This project is an [Armature](https://github.com/bryansparks/armature) showcase workflow, and contributions that improve the workflow quality, documentation, or add new research capabilities are welcome.
 

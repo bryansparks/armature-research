@@ -1,24 +1,193 @@
 # Research-Analyst
 
-Automated research analyst powered by **Armature**. Given a topic, Research-Analyst searches the web, extracts and reads sources, synthesizes findings, and produces a structured Markdown + HTML research briefing. It runs as a scheduled service, CLI tool, or webhook-triggered workflow.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![Built with Armature](https://img.shields.io/badge/built%20with-Armature-00A8E8)](https://github.com/bryansparks/armature)
 
-## Quick Start
+**Automated research analyst powered by agentic AI.** Given a topic, Research-Analyst searches the web, reads and extracts sources, iteratively deepens coverage, and produces a structured Markdown + HTML research briefing.
 
-### Installation
+> **Example Project:** Research-Analyst is a reference implementation demonstrating [Armature](https://github.com/bryansparks/armature), a YAML-configured agentic workflow harness. Use this repo as a template for building your own Armature-based applications.
+
+```bash
+# Install from PyPI
+pip install research-analyst
+
+# Run a research task
+armature run workflows/research-analyst.yaml --input "topic=AI regulation in the EU"
+```
+
+---
+
+## What's New
+
+This release rewrites Research-Analyst as a production-grade **Armature workflow** with an iterative, multi-agent research pipeline:
+
+- **Iterative deep research** — runs 1–3 research rounds, carrying forward gaps, themes, and fetched URLs so each round targets what the previous round missed.
+- **Subagent delegation** — the core search/extract/synthesize cycle is isolated in `workflows/research-round.yaml` and invoked in a loop from the parent workflow.
+- **Multi-source search** — Tavily web search plus optional Reddit discussions and YouTube transcripts (social tools degrade gracefully if not configured).
+- **Production reliability** — checkpoint/resume, cross-run source deduplication, continuation for incremental updates, cron/webhook triggers, and strict safety rules.
+- **Category-aware reports** — automatically formats output as product reviews, comparisons, how-to guides, fact-checks, or landscape briefings.
+- **Self-contained HTML reports** — dark/light theme, table of contents, collapsible sources, and print/export toolbar.
+
+---
+
+## What Research-Analyst Does
+
+A single command runs the full pipeline:
+
+1. **Decomposes** the topic into 5–8 specific sub-questions
+2. **Plans** targeted search queries for each sub-question
+3. **Searches** the web (Tavily), Reddit, and YouTube in parallel
+4. **Selects** the most valuable URLs from search results
+5. **Fetches** full content from each selected URL in parallel
+6. **Extracts** structured findings from each source
+7. **Synthesizes** findings into a coherent research summary
+8. **Evaluates** coverage completeness — if gaps remain, loops back for another iteration
+9. **Writes** a comprehensive research briefing in Markdown
+10. **Generates** a self-contained HTML report with dark/light theme, TOC, and collapsible sources
+
+**Typical run time:** 2–5 minutes per iteration (1–3 iterations depending on coverage).
+
+---
+
+## How the Iterative Loop Works
+
+The `deep_research_round` stage in `workflows/research-analyst.yaml` delegates to `workflows/research-round.yaml` as a subagent and runs it in a loop:
+
+```yaml
+- id: deep_research_round
+  depends_on: [decompose_query]
+  subagent_spec: workflows/research-round.yaml
+  loop:
+    max_iterations: 3
+    until: "{{ decide_round.continue_research == false }}"
+    carry_forward:
+      - decide_round.gaps
+      - decide_round.key_themes
+      - decide_round.coverage_score
+      - decide_round.urls_fetched
+      - decide_round.queries_used
+      - decide_round.source_count
+```
+
+Each research round performs a full `plan → search → select → fetch → extract → synthesize → decide` cycle. The `decide_round` stage returns a `continue_research` boolean plus a list of remaining gaps. If coverage is insufficient and the iteration cap hasn't been reached, Armature carries the selected keys forward and runs another round.
+
+**Why this matters:**
+
+- **Gap-filling queries** — round 2+ generates queries from the gaps identified in round 1, not rephrasings of the original topic.
+- **URL deduplication** — `urls_fetched` is carried forward, so later rounds don't waste LLM calls re-reading the same pages.
+- **Progressive synthesis** — the evolving report is merged with new findings each round instead of being rewritten from scratch.
+
+For a deep-dive into the design (IterResearch pattern, strategic workspace reconstruction, prompt-injection guards, low-quality filtering), see [`RESEARCH-MECHANICS.md`](./RESEARCH-MECHANICS.md).
+
+---
+
+## Built on Armature
+
+Research-Analyst is a production implementation of [Armature](https://github.com/bryansparks/armature), a YAML-configured agentic workflow harness. The entire research pipeline is declared in workflow specs and executed as a directed acyclic graph (DAG) of LLM agents, tool calls, and subagent delegation.
+
+### Armature Features Used
+
+| Feature | Benefit to Research-Analyst |
+|---------|-----------------------------|
+| **Iterative loop with `carry_forward`** | Deepens coverage across 1–3 iterations, passing only the compressed state between rounds |
+| **Subagent delegation** | Research round runs as an isolated subagent with its own 10-stage pipeline |
+| **Fan-out / Fan-in** | Parallel per-query search, per-URL fetch, per-source extraction |
+| **Model tier routing** | Cost-optimized routing (small for planning, large for extraction/synthesis) |
+| **Cross-run memory** | Remembers which URLs were already fetched across runs |
+| **Checkpoint/resume** | Interrupted runs recover gracefully — completed iterations are not re-run |
+| **Continuation** | Carries prior research themes forward for incremental "what's new" updates |
+| **Cron & webhook triggers** | Scheduled weekly refresh or on-demand webhook-triggered research |
+| **Strict safety mode** | Fail-closed tool governance with explicit allow rules |
+| **Post-run self-analysis** | Automatic quality review suggests improvements to the workflow |
+| **Category-aware formatting** | Report structure adapts to product, comparison, howto, factcheck, or landscape |
+
+### Workflow Specs
+
+| Workflow | Purpose | Stages | Iterations |
+|---------|---------|--------|------------|
+| `workflows/research-analyst.yaml` | Deep research briefing | 6 (parent) | Up to 3 (subagent loop) |
+| `workflows/research-round.yaml` | Single research iteration (subagent) | 10 | 1 per loop iteration |
+| `workflows/competitive-intel.yaml` | Competitive intelligence monitor | — | — |
+
+The parent workflow delegates to the subagent in a loop. Each iteration performs a full search→extract→synthesize→evaluate cycle. The loop continues until coverage is adequate or `max_iterations` (3) is reached.
+
+---
+
+## Installation
+
+The recommended way to install is from PyPI:
 
 ```bash
 pip install research-analyst
 ```
 
-### Basic Usage
+This pulls in the `armature` runtime and bundled workflow specs automatically.
+
+> **Built on Armature:** Research-Analyst runs on the [Armature](https://github.com/bryansparks/armature) agentic harness. You don't need to install it separately — `pip` resolves it as a dependency, along with the bundled `research-analyst` and `research-round` workflow specs that define the research pipeline.
+
+### From source (for development)
 
 ```bash
-# Run a research task from the CLI
-research-analyst --topic "AI regulation in the EU" --focus "how does the AI Act affect LLM providers?"
+git clone https://github.com/bryansparks/research-analyst
+pip install -e "research-analyst/[dev]"
+```
 
-# Or trigger via the webhook daemon
-# POST http://localhost:8000/webhook/research
-# { "topic": "AI regulation in the EU", "focus": "..." }
+### Optional social sources
+
+To enable Reddit and YouTube research, install the social extras:
+
+```bash
+pip install research-analyst[social]
+```
+
+This installs `praw` (Reddit) and `youtube-transcript-api` (YouTube transcripts). If these are missing, the workflow continues with web-only results.
+
+### API Keys
+
+Copy `.env.example` to `.env` and add your keys:
+
+```bash
+# Required: web search and content extraction
+TAVILY_API_KEY=tvly-...
+
+# Required: LLM access (default provider is OpenRouter)
+OPENROUTER_API_KEY=sk-or-...
+
+# Optional: Reddit discussion search
+# REDDIT_CLIENT_ID=...
+# REDDIT_CLIENT_SECRET=...
+```
+
+Get a Tavily key at [app.tavily.com](https://app.tavily.com). Get an OpenRouter key at [openrouter.ai](https://openrouter.ai).
+
+---
+
+## Using the Armature Workflow
+
+Research-Analyst is run with the `armature` CLI, not a custom Python entry point. The workflow spec in `workflows/research-analyst.yaml` declares the entire agentic pipeline.
+
+### Basic Research
+
+```bash
+armature run workflows/research-analyst.yaml \
+  --input "topic=SLM fine-tuning advances using LoRA and distillation"
+```
+
+### With Focus Constraint
+
+```bash
+armature run workflows/research-analyst.yaml \
+  --input "topic=AI regulation" \
+  --input "focus=how does the EU AI Act affect open-source LLM providers?"
+```
+
+### Force Fresh Run (Clear Checkpoint)
+
+```bash
+armature run workflows/research-analyst.yaml \
+  --input "topic=AI regulation" --force
 ```
 
 ### Incremental Research (Continuation)
@@ -27,96 +196,93 @@ Research-Analyst remembers prior runs. On subsequent executions with the same to
 
 ```bash
 # First run: initial research
-research-analyst --topic "AI regulation"
+armature run workflows/research-analyst.yaml --input "topic=AI regulation"
 
-# Second run (one week later): "what's new?"
-research-analyst --topic "AI regulation" --incremental
-
-# The system automatically updates the briefing with new sources and themes
+# Second run (one week later): focuses on "what's new"
+armature run workflows/research-analyst.yaml --input "topic=AI regulation"
 ```
 
-## Features
+### Inputs Reference
 
-### 🔍 Distributed Research
-- **Fan-out / Fan-in**: parallel source selection, extraction, and summarization
-- **Web search via Tavily**: finds the most relevant sources for your topic
-- **Local documents**: combine web research with custom PDFs and Markdown files
-- **Cross-run memory**: deduplicates sources across runs — avoid re-reading the same links
+| Input | Required | Description |
+|-------|----------|-------------|
+| `topic` | ✅ | The research question or subject area |
+| `focus` | — | Optional angle or constraint, e.g. `focus=regulatory implications` |
+| `documents` | — | Comma-separated local file paths to include as sources |
+| `max_sources` | — | Cap on URLs fetched per round (default: 12) |
 
-### ↻ Incremental Briefings
-- **Continuation block**: carries forward prior research themes and coverage gaps
-- **Scheduled refresh**: cron trigger for weekly, daily, or hourly updates
-- **Webhook trigger**: POST a topic and get back a fresh briefing asynchronously
-- **What's new detection**: identifies new themes, risks, or opportunities since the last run
+### Cron & Webhook Triggers
 
-### 📊 Structured Output
-- **Markdown briefing**: executive summary, key themes, source index, coverage gaps
-- **HTML report**: rendered version suitable for stakeholder distribution
-- **JSON metadata**: themes, confidence scores, source evaluation, prior research context
-
-### 🛡️ Production Hardened
-- **Safety mode**: strict tool allowlists prevent hallucination or scope creep
-- **Timeout & iteration limits**: 40-iteration, 200-LLM-call budget prevents runaway costs
-- **Checkpoint & resume**: interruptions don't restart — resume from the last completed stage
-- **Model tier routing**: small models for planning (cheap), large for extraction/synthesis (accurate)
-
-## Architecture
-
-Research-Analyst is declared entirely as an Armature YAML workflow (`workflows/research-analyst.yaml`):
+The workflow spec includes built-in triggers:
 
 ```yaml
-name: research-analyst
-mission: |
-  You are a senior research analyst. Given a topic, conduct systematic
-  research and synthesize a comprehensive, well-sourced briefing.
-
-model_tiers:
-  small: qwen/qwen3.6-27b       # planning
-  medium: minimax/minimax-m2.7  # orchestration
-  large: moonshotai/kimi-k2.6   # synthesis
-
 triggers:
   - type: cron
-    schedule: "0 6 * * 1"       # 6am UTC every Monday
+    schedule: "0 6 * * 1"    # 6am UTC every Monday — weekly topic refresh
   - type: webhook
-    path: /webhook/research
-
-continuation:
-  carry_forward:
-    - key: synthesize_findings.key_themes
-    - key: synthesize_findings.coverage_gaps
-  inject_as: prior_research
+    path: /webhook/research   # POST with {"topic": "...", "focus": "..."}
 ```
 
-### Stages (High-Level Pipeline)
+Configure these in `workflows/research-analyst.yaml` or via your Armature deployment settings.
 
-1. **parse_input** → Validate topic, focus, source constraints
-2. **search_sources** → Web search (fan-out for multiple angles)
-3. **select_sources** → Rank and filter results; respect max_sources cap
-4. **extract_content** → Fetch and parse URLs in parallel
-5. **summarize_sources** → Concurrent LLM summaries of each source
-6. **synthesize_findings** → Integrate summaries into a cohesive narrative
-7. **generate_briefing** → Markdown + HTML export
-8. **evaluate_quality** → Judge stage: assess coverage, accuracy, bias
+---
 
-Stages run in parallel where possible. All upstream context flows automatically to downstream stages — no manual wiring.
+## Output
+
+### HTML Report
+
+Written to `./research-output/<topic>_<run_id>.html`. Features:
+
+- Dark/light theme with aurora gradient hero section
+- Table of contents sidebar
+- Collapsible source list with credibility ratings
+- Category-specific formatting (product reviews, comparisons, how-to guides, etc.)
+- Print/export toolbar
+- Inline citations linking back to sources
+
+### Report Categories
+
+The `decompose_query` stage classifies the research topic into one of five categories, each with a tailored report format:
+
+| Category | Structure |
+|----------|-----------|
+| **product** | Executive Summary → Quick Comparison → Detailed Reviews → Verdict |
+| **comparison** | At a Glance → By Option → Head-to-Head → Best For |
+| **howto** | Prerequisites → Quick Guide → Step-by-Step → Troubleshooting |
+| **factcheck** | The Claim → Evidence For → Evidence Against → Verdict |
+| **landscape** | Executive Summary → Key Findings → By Sub-Question → Contradictions |
+
+### Markdown Briefing
+
+The validated Markdown report is available in the run output and is used as the source for the HTML render. It includes a source-quality assessment and an appendix of all sources consulted.
+
+---
+
+## Project Structure
+
+```
+research-analyst/
+├── research/
+│   └── tools/
+│       ├── web.py              # web_search, fetch_url, read_document, generate_html_report
+│       ├── social.py           # search_reddit, search_youtube_videos, fetch_youtube_transcript
+│       └── reporting.py        # Visual HTML report generator
+├── workflows/
+│   ├── research-analyst.yaml  # Parent workflow (6 stages + iterative loop)
+│   ├── research-round.yaml    # Subagent workflow (10 stages per iteration)
+│   └── competitive-intel.yaml  # Competitive intelligence monitor
+├── tests/
+│   └── tools/
+│       └── test_web.py        # Tool handler unit tests
+├── RESEARCH-MECHANICS.md      # Deep-dive into the iterative research design
+├── .env.example               # API key template
+├── pyproject.toml
+└── README.md
+```
+
+---
 
 ## Configuration
-
-### Environment Variables
-
-```bash
-# Required: one of these LLM provider keys
-OPENROUTER_API_KEY=sk-...
-# or
-ANTHROPIC_API_KEY=sk-ant-...
-
-# Required: web search
-TAVILY_API_KEY=tvly-...
-
-# Optional: custom output directory
-RESEARCH_OUTPUT_DIR=./reports
-```
 
 ### Model Swapping
 
@@ -125,116 +291,101 @@ Edit `workflows/research-analyst.yaml` to swap LLM providers or models:
 ```yaml
 model_tiers:
   small:
-    provider: anthropic
-    model: claude-3-haiku
-    api_key_env: ANTHROPIC_API_KEY
+    provider: openrouter
+    model: qwen/qwen3.6-27b        # planning, source selection
+  medium:
+    provider: openrouter
+    model: moonshotai/kimi-k2.7    # orchestration, evaluation
+  large:
+    provider: openrouter
+    model: z-ai/glm-5.2            # extraction, synthesis, writing
 ```
 
-All tier assignments (`worker: small`, `researcher: large`) remain the same — just change the underlying models.
+### Iterative Research Loop
 
-## CLI Commands
+The `deep_research_round` stage runs the subagent in a loop:
 
-```bash
-research-analyst --help
-
-# Run with defaults
-research-analyst --topic "Your topic"
-
-# With optional parameters
-research-analyst \
-  --topic "AI regulation" \
-  --focus "how does the EU AI Act affect open-source LLM providers?" \
-  --max-sources 15 \
-  --output-dir ./reports
-
-# Incremental run (use continuation)
-research-analyst \
-  --topic "AI regulation" \
-  --incremental
-
-# Trigger webhook daemon (listens for POST requests)
-research-analyst --daemon --port 8000
+```yaml
+- id: deep_research_round
+  subagent_spec: workflows/research-round.yaml
+  loop:
+    max_iterations: 3
+    until: "{{ decide_round.continue_research == false }}"
+    carry_forward:
+      - decide_round.gaps
+      - decide_round.key_themes
+      - decide_round.coverage_score
+      - decide_round.urls_fetched
+      - decide_round.queries_used
+      - decide_round.source_count
 ```
 
-## Webhook API
+Each iteration receives carry-forward data from the previous one, enabling:
+- **Gap-filling queries** on iteration 2+ (focused on identified coverage gaps)
+- **URL deduplication** (avoids re-fetching already-read sources)
+- **Progressive synthesis** (builds on prior themes rather than rewriting)
 
-```bash
-# Start the daemon
-research-analyst --daemon --port 8000
+### Tuning the Loop
 
-# Trigger research asynchronously
-curl -X POST http://localhost:8000/webhook/research \
-  -H "Content-Type: application/json" \
-  -d '{"topic": "AI regulation", "focus": "..."}'
+| Setting | Effect |
+|---------|--------|
+| `max_iterations` | Hard cap on research rounds |
+| `carry_forward` | Which state survives between rounds (keep this minimal) |
+| `until` | Jinja2 expression that decides when to stop |
 
-# Response
-{
-  "run_id": "research-20260529-143022",
-  "status": "queued",
-  "check_status_at": "http://localhost:8000/runs/research-20260529-143022"
-}
+For best results, do not carry forward raw search results or full fetched articles — only compressed state like `report`, `gaps`, `urls_fetched`, and `queries_used`.
 
-# Check status and fetch briefing
-curl http://localhost:8000/runs/research-20260529-143022
+---
+
+## Extending Research-Analyst
+
+The workflows are standard Armature specs and can be customized:
+
+### Add a New Search Source
+
+Create a tool module in `research/tools/`, then add it to both workflow specs:
+
+```yaml
+tools:
+  - module: research.tools.web
+  - module: research.tools.social
+  - module: research.tools.academic   # your new tool
 ```
 
-## Showcase: How Armature Powers Research-Analyst
+### Add a New Stage
 
-Research-Analyst is a production reference implementation of Armature. It demonstrates:
+```yaml
+- id: custom_analysis
+  depends_on: [extract_findings]
+  role:
+    name: Custom Analyst
+    type: researcher
+    model_tier: large
+    description: "Your custom analysis task..."
+  output_mode: guided_json
+```
 
-### **Fan-out / Fan-in** 
-- Search stage initiates 3 parallel sub-queries (different angles on the topic)
-- Extract stage reads 12 URLs concurrently
-- Summarize stage processes summaries in parallel
-- All results merge into a single synthesis context
+### Adjust Safety Rules
 
-### **Continuation**
-- Prior research (themes, gaps, coverage) carries forward to the next run
-- Synthesizer sees what was already found and focuses on "what's new"
-- Same topic, run weekly — progressive deepening, not repetition
+The default `safety_mode: strict` blocks any tool not explicitly allowed. Add allow rules for custom tools:
 
-### **Triggers**
-- Cron schedule: every Monday at 6am UTC, run a refresh on a fixed topic
-- Webhook: POST a topic, get back a briefing asynchronously
-- Both flow through the same YAML spec — orchestration is declarative
+```yaml
+safety_rules:
+  - tool: my_tool
+    condition: {field: query, op: truthy, value: ""}
+    action: allow
+```
 
-### **Memory & Deduplication**
-- Rolling memory window: last 5 sources are recorded
-- Subsequent runs know which URLs were already used — avoids redundant fetches
-- Cross-run context prevents the analyst from re-researching the same ground
-
-### **Safety & Governance**
-- Tool allowlist: only `web_search`, `fetch_url`, `read_document`, `generate_report` allowed
-- Iteration budget: 40-iteration / 200-LLM-call ceiling prevents runaway executions
-- Timeout: 1-hour hard deadline for any run
-
-### **Model Tier Routing**
-- Small (cheap): planning, search strategy, source filtering
-- Large (accurate): extraction, summarization, final synthesis
-- Frontier only for the judge stage (final quality evaluation)
-- Reduces costs 3-4x vs. running everything on a frontier model
+---
 
 ## Contributing
 
-Contributions welcome! Areas of focus:
-
-- New Tavily search strategies (add to `search_sources` stage)
-- Additional source types (LinkedIn, academic databases, RSS feeds)
-- Document ingestion improvements (add to `extract_content` stage)
-- Output formats (add to `generate_briefing` stage)
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+Contributions welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ## License
 
 MIT. See [LICENSE](./LICENSE) for details.
 
-## Support
-
-- **GitHub Issues**: Report bugs or request features
-- **Discussions**: Ask questions about Research-Analyst and Armature
-- **Slack**: Join the ElfTech community (coming soon)
-
 ---
 
-**Built with [Armature](https://armature.bryansparks.com)** — a YAML-first multi-agent workflow harness that improves itself every run.
+*Research-Analyst is built on [Armature](https://github.com/bryansparks/armature), combining iterative multi-agent research with production-grade workflow orchestration.*
