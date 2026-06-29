@@ -40,6 +40,38 @@ def test_select_sources_depends_on_new_stages():
         assert sid in deps, f"select_sources missing dep {sid}"
 
 
+def test_round_registers_manifest_module():
+    spec = _load(ROUND)
+    modules = [t["module"] for t in spec["tools"]]
+    assert "research.tools.manifest" in modules
+
+
+def test_round_has_collect_source_manifest_stage():
+    ids = [s["id"] for s in _load(ROUND)["stages"]]
+    assert "collect_source_manifest" in ids
+
+
+def test_collect_source_manifest_depends_on_select_and_searches():
+    spec = _load(ROUND)
+    stage = next(s for s in spec["stages"] if s["id"] == "collect_source_manifest")
+    deps = stage["depends_on"]
+    for sid in ("select_sources", "run_searches", "run_hn_search",
+                "run_polymarket_search", "run_github_search",
+                "run_reddit_search", "fetch_youtube_transcripts"):
+        assert sid in deps, f"collect_source_manifest missing dep {sid}"
+
+
+def test_collect_source_manifest_calls_build_source_manifest():
+    spec = _load(ROUND)
+    stage = next(s for s in spec["stages"] if s["id"] == "collect_source_manifest")
+    assert stage["tool_call"]["name"] == "build_source_manifest"
+
+
+def test_round_declares_sources_manifest_input():
+    names = [i["name"] for i in _load(ROUND)["contracts"]["inputs"]]
+    assert "sources_manifest" in names
+
+
 # ── research-analyst.yaml ──────────────────────────────────────────────────────
 
 def test_analyst_declares_recency_input():

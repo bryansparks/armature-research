@@ -49,6 +49,7 @@ contracts:
     - name: urls_fetched       # Carry-forward: URLs already fetched (for deduplication)
     - name: queries_used       # Carry-forward: queries already used (to avoid repetition)
     - name: source_count       # Carry-forward: running total of sources consulted
+    - name: sources_manifest   # Carry-forward: enriched source manifest from previous iteration
   max_iterations: 10
   max_llm_calls: 80
   timeout_hours: 0.5
@@ -76,6 +77,7 @@ tools:
   - module: research.tools.social
   - module: research.tools.communities
   - module: research.tools.recency
+  - module: research.tools.manifest
 
 # ── Stages ──────────────────────────────────────────────────────────────────────────
 
@@ -360,6 +362,28 @@ stages:
               credibility_note:   {type: string}
               image:              {type: string, description: "Thumbnail image URL from search result, if available"}
         coverage_note: {type: string}
+
+  # ── 3b. Build an enriched source manifest (engagement labels) for the report ──
+  # Non-LLM tool call: joins select_sources.selected_urls with the raw search
+  # results by normalized URL to attach engagement_label, and accumulates the
+  # manifest across rounds via the carried-forward {{ sources_manifest }}.
+  # Never raises; a tool error degrades to a smaller/empty manifest.
+  - id: collect_source_manifest
+    depends_on:
+      [select_sources, run_searches, run_hn_search, run_polymarket_search,
+       run_github_search, run_reddit_search, fetch_youtube_transcripts]
+    fail_as_value: true
+    tool_call:
+      name: build_source_manifest
+      args:
+        selected_urls:      "{{ select_sources.selected_urls }}"
+        prior_manifest:     "{{ sources_manifest }}"
+        web_results:        "{{ run_searches }}"
+        hn_results:         "{{ run_hn_search }}"
+        polymarket_results: "{{ run_polymarket_search }}"
+        github_results:     "{{ run_github_search }}"
+        reddit_results:     "{{ run_reddit_search }}"
+        youtube_results:    "{{ fetch_youtube_transcripts }}"
 
   # ── 4. Fetch full content of each selected URL in parallel ────────────────────────
   - id: fetch_articles
