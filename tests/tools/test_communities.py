@@ -108,3 +108,65 @@ async def test_polymarket_recency_filter_excludes_old_markets():
     assert len(result["results"]) == 1
     end_dates = [r["endDate"] for r in result["results"]]
     assert "2026-01-01" not in end_dates
+
+
+# ── search_github ──────────────────────────────────────────────────────────────
+
+async def test_github_empty_query_returns_error():
+    from research.tools.communities import _handle_search_github
+    result = await _handle_search_github({"query": ""})
+    assert result["results"] == []
+    assert "error" in result
+
+
+async def test_github_http_error_degrades_gracefully():
+    import urllib.error
+    from research.tools.communities import _handle_search_github
+    with patch("research.tools.communities._http_get_json",
+               side_effect=urllib.error.HTTPError("u", 403, "Forbidden", {}, None)):
+        result = await _handle_search_github({"query": "rust"})
+    assert result["results"] == []
+    assert "403" in result["error"]
+
+
+async def test_github_returns_structured_results():
+    payload = {"items": [
+        {"full_name": "rust-lang/rust", "html_url": "https://github.com/rust-lang/rust",
+         "description": "A language", "stargazers_count": 90000, "language": "Rust",
+         "updated_at": "2026-06-20T00:00:00Z"},
+        {"full_name": "other/repo", "html_url": "https://github.com/other/repo",
+         "description": None, "stargazers_count": 0, "language": None,
+         "updated_at": "2026-06-21T00:00:00Z"},
+    ]}
+    from research.tools.communities import _handle_search_github
+    with patch("research.tools.communities._http_get_json", return_value=payload) as mock_get:
+        result = await _handle_search_github({"query": "rust", "max_results": 5})
+    assert len(result["results"]) == 2
+    r0 = result["results"][0]
+    assert r0["full_name"] == "rust-lang/rust"
+    assert r0["stargazers_count"] == 90000
+    assert r0["engagement_score"] == 1.0  # saturates at SCALES["github_stars"]
+    assert "90,000" in r0["engagement_label"]
+    assert r0["source_type"] == "github"
+    # No-token request still works (no Authorization header)
+    sent_headers = mock_get.call_args.kwargs.get("headers", {})
+    assert "Authorization" not in sent_headers
+
+
+async def test_github_recency_filter_added_to_query():
+    payload = {"items": []}
+    from research.tools.communities import _handle_search_github
+    with patch("research.tools.communities._http_get_json", return_value=payload) as mock_get:
+        await _handle_search_github({"query": "ai", "recency_iso": "2026-05-29T00:00:00Z"})
+    sent_url = mock_get.call_args.args[0]
+    assert "pushed%3A%3E2026-05-29" in sent_url
+
+
+async def test_github_token_added_when_env_set(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+    payload = {"items": []}
+    from research.tools.communities import _handle_search_github
+    with patch("research.tools.communities._http_get_json", return_value=payload) as mock_get:
+        await _handle_search_github({"query": "ai"})
+    sent_headers = mock_get.call_args.kwargs.get("headers", {})
+    assert sent_headers.get("Authorization") == "Bearer ghp_secret"

@@ -194,6 +194,54 @@ async def _handle_search_polymarket(args: dict[str, Any]) -> dict[str, Any]:
         return {"query": query, "results": [], "error": str(exc)}
 
 
+# ── GitHub ─────────────────────────────────────────────────────────────────────
+
+async def _handle_search_github(args: dict[str, Any]) -> dict[str, Any]:
+    """Search GitHub repositories, scored by stars. GITHUB_TOKEN is optional."""
+    query = args.get("query", "").strip()
+    max_results = int(args.get("max_results") or 5)
+    recency_iso = (args.get("recency_iso") or "").strip()
+
+    if not query:
+        return {"query": query, "results": [], "error": "empty query"}
+
+    q = f"{query} pushed:>{_date_only(recency_iso)}" if recency_iso else query
+    url = (
+        "https://api.github.com/search/repositories?"
+        + urllib.parse.urlencode({"q": q, "sort": "stars", "order": "desc", "per_page": max_results})
+    )
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        data = _http_get_json(url, headers=headers)
+    except urllib.error.HTTPError as exc:
+        return {"query": query, "results": [], "error": f"github api {exc.code}"}
+    except Exception as exc:
+        return {"query": query, "results": [], "error": str(exc)}
+
+    try:
+        results = []
+        for repo in data.get("items", [])[:max_results]:
+            stars = int(repo.get("stargazers_count") or 0)
+            results.append({
+                "url": repo.get("html_url") or "",
+                "full_name": repo.get("full_name") or "",
+                "description": repo.get("description") or "",
+                "stargazers_count": stars,
+                "language": repo.get("language") or "",
+                "updated_at": repo.get("updated_at") or "",
+                "engagement_score": round(log_normalize(stars, SCALES["github_stars"]), 3),
+                "engagement_label": f"★ {stars:,}" if stars else "★ 0",
+                "source_type": "github",
+            })
+        return {"query": query, "results": results}
+    except Exception as exc:
+        return {"query": query, "results": [], "error": str(exc)}
+
+
 def register(registry: ToolRegistry) -> None:
     """Register community-signal tools. Populated across Tasks 3–6."""
     registry.register(ToolDescriptor(
@@ -226,5 +274,22 @@ def register(registry: ToolRegistry) -> None:
             "query":       {"type": "string",  "description": "Search query string"},
             "max_results": {"type": "integer", "description": "Max results (default 5)"},
             "recency_iso": {"type": "string",  "description": "Optional ISO-8601 cutoff for endDate filter"},
+        },
+    ))
+    registry.register(ToolDescriptor(
+        name="search_github",
+        description=(
+            "Search GitHub repositories matching a query, scored by stars. Uses the free "
+            "GitHub Search API; set GITHUB_TOKEN to raise rate limits (unauthenticated is "
+            "~10 req/min). Optionally filter to repos pushed after an ISO-8601 date. "
+            "Returns {query, results: [{url, full_name, description, stargazers_count, "
+            "language, updated_at, engagement_score, engagement_label, source_type}], error?}."
+        ),
+        permission=PermissionLevel.READ_ONLY,
+        handler=_handle_search_github,
+        parameters={
+            "query":       {"type": "string",  "description": "Search query string"},
+            "max_results": {"type": "integer", "description": "Max results (default 5)"},
+            "recency_iso": {"type": "string",  "description": "Optional ISO-8601 cutoff; adds pushed:>date qualifier"},
         },
     ))
