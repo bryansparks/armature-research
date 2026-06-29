@@ -277,6 +277,7 @@ stages:
 
         Topic: {{ topic or Topic }}
         {% if focus %}Focus: {{ focus }}{% endif %}
+        {% if recency %}Recency window requested: {{ recency }}. Frame findings as recent and note the window in the report's scope note.{% endif %}
         Run ID: {{ run_id }}
 
         The research synthesis is in deep_research_round.decide_round.report.
