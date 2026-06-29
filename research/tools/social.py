@@ -38,6 +38,8 @@ except ImportError:
 from armature.permissions.permissions import PermissionLevel
 from armature.registry.registry import ToolDescriptor, ToolRegistry
 
+from research.tools.engagement import log_normalize, SCALES
+
 
 # ── Reddit client factory ─────────────────────────────────────────────────────
 
@@ -62,6 +64,23 @@ def _reddit_client():
         client_secret=client_secret,
         user_agent="armature-research-analyst/1.0 (contact: research@example.com)",
     )
+
+
+def _reddit_time_filter(recency_days: Any) -> str:
+    """Map a day count to the nearest PRAW time_filter bucket; 'all' when unset."""
+    try:
+        d = int(recency_days)
+    except (TypeError, ValueError):
+        return "all"
+    if d <= 1:
+        return "day"
+    if d <= 7:
+        return "week"
+    if d <= 31:
+        return "month"
+    if d <= 366:
+        return "year"
+    return "all"
 
 
 # ── Tavily client (shared with web.py, local copy avoids coupling) ────────────
@@ -123,15 +142,27 @@ async def _handle_search_reddit(args: dict[str, Any]) -> dict[str, Any]:
 
     try:
         results = []
-        for submission in reddit.subreddit(subreddits).search(query, limit=max_results, sort=sort):
+        search_kwargs = dict(limit=max_results, sort=sort)
+        recency_days = args.get("recency_days")
+        if recency_days:
+            search_kwargs["time_filter"] = _reddit_time_filter(recency_days)
+        for submission in reddit.subreddit(subreddits).search(query, **search_kwargs):
+            score = int(submission.score or 0)
+            num_comments = int(submission.num_comments or 0)
             results.append({
                 "url": f"https://reddit.com{submission.permalink}",
                 "title": submission.title,
                 "subreddit": submission.subreddit.display_name,
-                "score": submission.score,
-                "num_comments": submission.num_comments,
+                "score": score,
+                "num_comments": num_comments,
                 "snippet": (submission.selftext or "")[:500],
                 "created_utc": int(submission.created_utc),
+                "engagement_score": round(max(
+                    log_normalize(score, SCALES["reddit_score"]),
+                    log_normalize(num_comments, SCALES["reddit_comments"]),
+                ), 3),
+                "engagement_label": f"▲ {score} · {num_comments} comments",
+                "source_type": "reddit",
             })
         return {"query": query, "subreddits": subreddits, "results": results}
     except Exception as exc:
@@ -167,12 +198,19 @@ async def _handle_search_youtube_videos(args: dict[str, Any]) -> dict[str, Any]:
         if len(videos) >= max_total:
             break
         try:
-            response = client.search(
+            search_kwargs = dict(
                 query=f"{q} site:youtube.com",
                 max_results=max_per_query,
                 search_depth="basic",
                 include_answer=False,
             )
+            recency_days = args.get("recency_days")
+            if recency_days:
+                try:
+                    search_kwargs["days"] = int(recency_days)
+                except (TypeError, ValueError):
+                    pass
+            response = client.search(**search_kwargs)
             for r in response.get("results", []):
                 url = r.get("url", "")
                 video_id = _extract_video_id(url)
@@ -255,6 +293,7 @@ def register(registry: ToolRegistry) -> None:
             "subreddits":  {"type": "string",  "description": "Subreddit(s) to search (default: 'all')"},
             "max_results": {"type": "integer", "description": "Maximum posts to return (default 5)"},
             "sort":        {"type": "string",  "description": "Sort: relevance|hot|new|top (default: relevance)"},
+            "recency_days": {"type": "integer", "description": "Optional: restrict to posts from the last N days (PRAW time_filter)"},
         },
     ))
     registry.register(ToolDescriptor(
@@ -271,6 +310,7 @@ def register(registry: ToolRegistry) -> None:
             "queries":       {"type": "array",   "description": "List of query strings or objects with a 'query' field"},
             "max_per_query": {"type": "integer", "description": "Max videos per query (default 3)"},
             "max_total":     {"type": "integer", "description": "Max total videos returned (default 8)"},
+            "recency_days": {"type": "integer", "description": "Optional: restrict to videos indexed in the last N days (Tavily days)"},
         },
     ))
     registry.register(ToolDescriptor(
