@@ -170,3 +170,14 @@ async def test_github_token_added_when_env_set(monkeypatch):
         await _handle_search_github({"query": "ai"})
     sent_headers = mock_get.call_args.kwargs.get("headers", {})
     assert sent_headers.get("Authorization") == "Bearer ghp_secret"
+
+
+# ── register() ────────────────────────────────────────────────────────────────
+
+def test_communities_register_exposes_all_three_tools():
+    from unittest.mock import MagicMock
+    from research.tools.communities import register
+    registry = MagicMock()
+    register(registry)
+    names = [c.args[0].name for c in registry.register.call_args_list]
+    assert {"search_hackernews", "search_polymarket", "search_github"} <= set(names)
