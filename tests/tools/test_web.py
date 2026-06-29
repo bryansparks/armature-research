@@ -51,3 +51,27 @@ def test_is_low_quality_short_bare_cookie():
 def test_is_low_quality_bare_copyright():
     """The word 'copyright' alone is NOT a marker — only compound phrases are."""
     assert is_low_quality("Understanding copyright law in the digital age") is False
+
+# ── recency_days forwarding ────────────────────────────────────────────────────
+
+async def test_web_search_forwards_recency_days_to_tavily(monkeypatch):
+    from unittest.mock import MagicMock
+    captured = {}
+    fake_client = MagicMock()
+    fake_client.search.return_value = {"results": []}
+    monkeypatch.setattr("research.tools.web._tavily_client", lambda: fake_client)
+    from research.tools.web import _handle_web_search
+    await _handle_web_search({"query": "ai", "recency_days": 30})
+    kwargs = fake_client.search.call_args.kwargs
+    assert kwargs["days"] == 30
+
+
+async def test_web_search_omits_days_when_recency_unset(monkeypatch):
+    from unittest.mock import MagicMock
+    fake_client = MagicMock()
+    fake_client.search.return_value = {"results": []}
+    monkeypatch.setattr("research.tools.web._tavily_client", lambda: fake_client)
+    from research.tools.web import _handle_web_search
+    await _handle_web_search({"query": "ai"})
+    kwargs = fake_client.search.call_args.kwargs
+    assert "days" not in kwargs

@@ -108,13 +108,20 @@ async def _handle_web_search(args: dict[str, Any]) -> dict[str, Any]:
         client = _tavily_client()
         # search_depth="basic" returns snippets only — fast and cheap.
         # The select_sources + fetch_url stages handle full content retrieval.
-        response = client.search(
+        search_kwargs = dict(
             query=query,
             max_results=max_results,
             search_depth="basic",
             include_answer=False,
             include_images=True,      # surface thumbnail images for the report
         )
+        recency_days = args.get("recency_days")
+        if recency_days:
+            try:
+                search_kwargs["days"] = int(recency_days)
+            except (TypeError, ValueError):
+                pass
+        response = client.search(**search_kwargs)
         results = [
             {
                 "url":     r.get("url", ""),
@@ -333,6 +340,7 @@ def register(registry: ToolRegistry) -> None:
         parameters={
             "query":       {"type": "string",  "description": "Search query string"},
             "max_results": {"type": "integer", "description": "Maximum number of results (default 5)"},
+            "recency_days": {"type": "integer", "description": "Optional: restrict to results from the last N days (Tavily `days`)"},
         },
     ))
     registry.register(ToolDescriptor(
