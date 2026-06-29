@@ -1,4 +1,3 @@
-# tests/tools/test_recency.py
 """Tests for research/tools/recency.py — recency window parsing."""
 import pytest
 from unittest.mock import MagicMock

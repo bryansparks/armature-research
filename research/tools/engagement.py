@@ -1,4 +1,3 @@
-# research/tools/engagement.py
 """Engagement metric normalization for research sources.
 
 Maps source-native engagement metrics (upvotes, stars, volume, views, Tavily

@@ -1,4 +1,3 @@
-# research/tools/communities.py
 """Community-signal research tools: Hacker News, Polymarket, GitHub.
 
 All three use free public HTTP APIs and degrade gracefully on network/auth failure.
@@ -168,6 +167,9 @@ async def _handle_search_polymarket(args: dict[str, Any]) -> dict[str, Any]:
             question = m.get("question") or ""
             if needle not in question.lower():
                 continue
+            # Recency filter on endDate (not startDate): keep markets still
+            # resolvable after the cutoff. Spec mentioned startDate/endDate;
+            # endDate is the more useful signal for "active within the window."
             end = (m.get("endDate") or "")[:10]
             if cutoff and end and end < cutoff:
                 continue

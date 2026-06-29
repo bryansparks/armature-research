@@ -1,4 +1,3 @@
-# tests/tools/test_engagement.py
 """Tests for research/tools/engagement.py — engagement metric normalization."""
 import math
 from research.tools.engagement import log_normalize, SCALES
