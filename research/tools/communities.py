@@ -91,6 +91,103 @@ async def _handle_search_hackernews(args: dict[str, Any]) -> dict[str, Any]:
     return {"query": query, "results": results}
 
 
+# ── Polymarket ─────────────────────────────────────────────────────────────────
+
+def _is_number(x: Any) -> bool:
+    try:
+        float(x)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _parse_polymarket_outcomes(market: dict) -> tuple[list[str], list[float]]:
+    raw = market.get("outcomes")
+    if isinstance(raw, str):
+        try:
+            outcomes = json.loads(raw)
+        except json.JSONDecodeError:
+            outcomes = []
+    else:
+        outcomes = raw or []
+    prices = market.get("outcomePrices")
+    if isinstance(prices, str):
+        try:
+            prices = json.loads(prices)
+        except json.JSONDecodeError:
+            prices = []
+    else:
+        prices = prices or []
+    names = [str(o) for o in outcomes]
+    odds = [float(p) for p in prices if _is_number(p)]
+    return names, odds
+
+
+def _polymarket_label(volume: float, odds: list[float]) -> str:
+    if volume >= 1_000_000:
+        vol = f"${volume / 1_000_000:.1f}M vol"
+    elif volume > 0:
+        vol = f"${volume / 1000:.0f}K vol"
+    else:
+        vol = "no volume"
+    if odds:
+        return vol + " · " + " / ".join(f"{o * 100:.0f}%" for o in odds[:2])
+    return vol
+
+
+async def _handle_search_polymarket(args: dict[str, Any]) -> dict[str, Any]:
+    """Search Polymarket prediction markets by query substring, scored by volume."""
+    query = args.get("query", "").strip()
+    max_results = int(args.get("max_results", 5))
+    recency_iso = (args.get("recency_iso") or "").strip()
+
+    if not query:
+        return {"query": query, "results": [], "error": "empty query"}
+
+    url = (
+        "https://gamma-api.polymarket.com/markets?"
+        + urllib.parse.urlencode({
+            "_limit": 100, "active": "true", "closed": "false",
+            "order": "volumeNum", "ascending": "false",
+        })
+    )
+    try:
+        data = _http_get_json(url)
+    except Exception as exc:
+        return {"query": query, "results": [], "error": str(exc)}
+
+    markets = data if isinstance(data, list) else (data.get("data") or data.get("markets") or [])
+    needle = query.lower()
+    cutoff = _date_only(recency_iso)
+    results = []
+    for m in markets:
+        question = m.get("question") or ""
+        if needle not in question.lower():
+            continue
+        end = (m.get("endDate") or "")[:10]
+        if cutoff and end and end < cutoff:
+            continue
+        slug = m.get("slug") or m.get("eventSlug") or ""
+        volume = float(m.get("volumeNum") or m.get("volume") or 0)
+        liquidity = float(m.get("liquidityNum") or m.get("liquidity") or 0)
+        outcomes, odds = _parse_polymarket_outcomes(m)
+        results.append({
+            "url": f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com",
+            "question": question or "(no question)",
+            "volume": volume,
+            "liquidity": liquidity,
+            "outcomes": outcomes,
+            "odds": odds,
+            "endDate": end,
+            "engagement_score": round(log_normalize(volume, SCALES["polymarket_volume"]), 3),
+            "engagement_label": _polymarket_label(volume, odds),
+            "source_type": "polymarket",
+        })
+        if len(results) >= max_results:
+            break
+    return {"query": query, "results": results}
+
+
 def register(registry: ToolRegistry) -> None:
     """Register community-signal tools. Populated across Tasks 3–6."""
     registry.register(ToolDescriptor(
@@ -107,5 +204,21 @@ def register(registry: ToolRegistry) -> None:
             "query":       {"type": "string",  "description": "Search query string"},
             "max_results": {"type": "integer", "description": "Max results (default 5)"},
             "recency_iso": {"type": "string",  "description": "Optional ISO-8601 cutoff for created_at filter"},
+        },
+    ))
+    registry.register(ToolDescriptor(
+        name="search_polymarket",
+        description=(
+            "Search Polymarket prediction markets by query substring, scored by volume. "
+            "Uses the free gamma API (no key). Optionally filter to markets ending after "
+            "an ISO-8601 cutoff. Returns {query, results: [{url, question, volume, liquidity, "
+            "outcomes, odds, endDate, engagement_score, engagement_label, source_type}], error?}."
+        ),
+        permission=PermissionLevel.READ_ONLY,
+        handler=_handle_search_polymarket,
+        parameters={
+            "query":       {"type": "string",  "description": "Search query string"},
+            "max_results": {"type": "integer", "description": "Max results (default 5)"},
+            "recency_iso": {"type": "string",  "description": "Optional ISO-8601 cutoff for endDate filter"},
         },
     ))
