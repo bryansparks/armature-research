@@ -58,6 +58,7 @@ contracts:
   inputs:
     - name: topic          # The research question or subject area (required)
     - name: focus          # Optional: specific angle or constraint ("focus on regulatory implications")
+    - name: recency        # Optional: recent-results window, e.g. "30d", "3d", "2mo". Unset = open-ended.
     - name: documents      # Optional: list of local file paths to include as sources
     - name: max_sources    # Optional: cap on URLs fetched (default 12)
     - name: run_id         # Injected by the harness at runtime
