@@ -105,5 +105,6 @@ async def test_polymarket_recency_filter_excludes_old_markets():
     with patch("research.tools.communities._http_get_json", return_value=payload):
         result = await _handle_search_polymarket(
             {"query": "election", "recency_iso": "2026-06-01T00:00:00Z"})
+    assert len(result["results"]) == 1
     end_dates = [r["endDate"] for r in result["results"]]
     assert "2026-01-01" not in end_dates

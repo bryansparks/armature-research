@@ -52,7 +52,7 @@ def _date_only(iso: str) -> str:
 async def _handle_search_hackernews(args: dict[str, Any]) -> dict[str, Any]:
     """Search Hacker News via the Algolia API, scored by points and comments."""
     query = args.get("query", "").strip()
-    max_results = int(args.get("max_results", 5))
+    max_results = int(args.get("max_results") or 5)
     recency_iso = (args.get("recency_iso") or "").strip()
 
     if not query:
@@ -69,26 +69,29 @@ async def _handle_search_hackernews(args: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return {"query": query, "results": [], "error": str(exc)}
 
-    results = []
-    for hit in data.get("hits", [])[:max_results]:
-        points = int(hit.get("points") or 0)
-        comments = int(hit.get("num_comments") or 0)
-        url = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID', '')}"
-        results.append({
-            "url": url,
-            "title": hit.get("title") or "(untitled)",
-            "points": points,
-            "num_comments": comments,
-            "author": hit.get("author") or "",
-            "created_at": hit.get("created_at") or "",
-            "engagement_score": round(max(
-                log_normalize(points, SCALES["hn_points"]),
-                log_normalize(comments, SCALES["hn_comments"]),
-            ), 3),
-            "engagement_label": f"▲ {points} · {comments} comments",
-            "source_type": "hackernews",
-        })
-    return {"query": query, "results": results}
+    try:
+        results = []
+        for hit in data.get("hits", [])[:max_results]:
+            points = int(hit.get("points") or 0)
+            comments = int(hit.get("num_comments") or 0)
+            url = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID', '')}"
+            results.append({
+                "url": url,
+                "title": hit.get("title") or "(untitled)",
+                "points": points,
+                "num_comments": comments,
+                "author": hit.get("author") or "",
+                "created_at": hit.get("created_at") or "",
+                "engagement_score": round(max(
+                    log_normalize(points, SCALES["hn_points"]),
+                    log_normalize(comments, SCALES["hn_comments"]),
+                ), 3),
+                "engagement_label": f"▲ {points} · {comments} comments",
+                "source_type": "hackernews",
+            })
+        return {"query": query, "results": results}
+    except Exception as exc:
+        return {"query": query, "results": [], "error": str(exc)}
 
 
 # ── Polymarket ─────────────────────────────────────────────────────────────────
@@ -138,7 +141,7 @@ def _polymarket_label(volume: float, odds: list[float]) -> str:
 async def _handle_search_polymarket(args: dict[str, Any]) -> dict[str, Any]:
     """Search Polymarket prediction markets by query substring, scored by volume."""
     query = args.get("query", "").strip()
-    max_results = int(args.get("max_results", 5))
+    max_results = int(args.get("max_results") or 5)
     recency_iso = (args.get("recency_iso") or "").strip()
 
     if not query:
@@ -156,36 +159,39 @@ async def _handle_search_polymarket(args: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return {"query": query, "results": [], "error": str(exc)}
 
-    markets = data if isinstance(data, list) else (data.get("data") or data.get("markets") or [])
-    needle = query.lower()
-    cutoff = _date_only(recency_iso)
-    results = []
-    for m in markets:
-        question = m.get("question") or ""
-        if needle not in question.lower():
-            continue
-        end = (m.get("endDate") or "")[:10]
-        if cutoff and end and end < cutoff:
-            continue
-        slug = m.get("slug") or m.get("eventSlug") or ""
-        volume = float(m.get("volumeNum") or m.get("volume") or 0)
-        liquidity = float(m.get("liquidityNum") or m.get("liquidity") or 0)
-        outcomes, odds = _parse_polymarket_outcomes(m)
-        results.append({
-            "url": f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com",
-            "question": question or "(no question)",
-            "volume": volume,
-            "liquidity": liquidity,
-            "outcomes": outcomes,
-            "odds": odds,
-            "endDate": end,
-            "engagement_score": round(log_normalize(volume, SCALES["polymarket_volume"]), 3),
-            "engagement_label": _polymarket_label(volume, odds),
-            "source_type": "polymarket",
-        })
-        if len(results) >= max_results:
-            break
-    return {"query": query, "results": results}
+    try:
+        markets = data if isinstance(data, list) else (data.get("data") or data.get("markets") or [])
+        needle = query.lower()
+        cutoff = _date_only(recency_iso)
+        results = []
+        for m in markets:
+            question = m.get("question") or ""
+            if needle not in question.lower():
+                continue
+            end = (m.get("endDate") or "")[:10]
+            if cutoff and end and end < cutoff:
+                continue
+            slug = m.get("slug") or m.get("eventSlug") or ""
+            volume = float(m.get("volumeNum") or m.get("volume") or 0)
+            liquidity = float(m.get("liquidityNum") or m.get("liquidity") or 0)
+            outcomes, odds = _parse_polymarket_outcomes(m)
+            results.append({
+                "url": f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com",
+                "question": question or "(no question)",
+                "volume": volume,
+                "liquidity": liquidity,
+                "outcomes": outcomes,
+                "odds": odds,
+                "endDate": end,
+                "engagement_score": round(log_normalize(volume, SCALES["polymarket_volume"]), 3),
+                "engagement_label": _polymarket_label(volume, odds),
+                "source_type": "polymarket",
+            })
+            if len(results) >= max_results:
+                break
+        return {"query": query, "results": results}
+    except Exception as exc:
+        return {"query": query, "results": [], "error": str(exc)}
 
 
 def register(registry: ToolRegistry) -> None:
