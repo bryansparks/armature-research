@@ -67,6 +67,19 @@ def test_collect_source_manifest_calls_build_source_manifest():
     assert stage["tool_call"]["name"] == "build_source_manifest"
 
 
+def test_collect_source_manifest_prior_manifest_uses_carry_forward_path():
+    """prior_manifest must read the carried manifest via _iteration.carry_forward.
+    Dot-path carry (collect_source_manifest.sources_manifest) nests under
+    _iteration.carry_forward; a bare {{ sources_manifest }} does NOT resolve
+    (only carry_forward: None / whole-result carry flattens to top level). See
+    tests/workflows/test_carry_forward_contract.py for the mechanism proof."""
+    spec = _load(ROUND)
+    stage = next(s for s in spec["stages"] if s["id"] == "collect_source_manifest")
+    prior = stage["tool_call"]["args"]["prior_manifest"]
+    assert "_iteration.carry_forward.collect_source_manifest.sources_manifest" in prior
+    assert "{{ sources_manifest }}" not in prior  # bare ref does not resolve
+
+
 def test_round_declares_sources_manifest_input():
     names = [i["name"] for i in _load(ROUND)["contracts"]["inputs"]]
     assert "sources_manifest" in names

@@ -366,7 +366,10 @@ stages:
   # ── 3b. Build an enriched source manifest (engagement labels) for the report ──
   # Non-LLM tool call: joins select_sources.selected_urls with the raw search
   # results by normalized URL to attach engagement_label, and accumulates the
-  # manifest across rounds via the carried-forward {{ sources_manifest }}.
+  # manifest across rounds via the carried-forward
+  # {{ _iteration.carry_forward.collect_source_manifest.sources_manifest }}
+  # (dot-path carry nests under _iteration.carry_forward; a bare top-level
+  # reference does not resolve — see tests/workflows/test_carry_forward_contract.py).
   # Never raises; a tool error degrades to a smaller/empty manifest.
   - id: collect_source_manifest
     depends_on:
@@ -377,7 +380,7 @@ stages:
       name: build_source_manifest
       args:
         selected_urls:      "{{ select_sources.selected_urls }}"
-        prior_manifest:     "{{ sources_manifest }}"
+        prior_manifest:     "{{ _iteration.carry_forward.collect_source_manifest.sources_manifest }}"
         web_results:        "{{ run_searches }}"
         hn_results:         "{{ run_hn_search }}"
         polymarket_results: "{{ run_polymarket_search }}"
