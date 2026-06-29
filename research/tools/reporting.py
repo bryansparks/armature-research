@@ -865,6 +865,7 @@ body::after {{
 .sources-list a:hover {{ color: var(--accent); }}
 .sources-list .snum {{ color: var(--text-muted); font-size: 0.75rem; min-width: 1.5rem; text-align: right; flex-shrink: 0; }}
 .sources-list .sdomain {{ color: var(--text-muted); font-size: 0.75rem; margin-left: auto; flex-shrink: 0; }}
+.sources-list .sbadge {{ color: var(--accent); font-size: 0.7rem; margin-left: 0.5rem; flex-shrink: 0; }}
 
 /* ── Footer ────────────────────────────────────────────── */
 .report-footer {{
@@ -1160,10 +1161,16 @@ def generate_visual_report(
                     domain = domain[4:]
             except Exception:
                 domain = url
+            label = s.get("engagement_label")
+            label_html = (
+                f'<span class="sbadge">{html.escape(label)}</span>'
+                if label else ""
+            )
             items.append(
                 f'<a href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">'
                 f'<span class="snum">{i}.</span>'
                 f'<span>{title}</span>'
+                f'{label_html}'
                 f'<span class="sdomain">{html.escape(domain)}</span>'
                 f'</a>'
             )
