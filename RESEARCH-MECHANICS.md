@@ -2,6 +2,18 @@
 
 **How the Armature iterative deep research workflow works, why it works, and what it borrows from.**
 
+> **Note (2026-06-29):** The loop mechanics below describe an earlier version of the
+> workflow. The current pipeline has **15 subagent stages** (adds `prepare_recency` plus
+> Hacker News / Polymarket / GitHub search and a non-LLM `collect_source_manifest` stage),
+> runs `max_iterations: 3` with `until: "{{ decide_round.continue_research == false }}"`,
+> and **no longer uses `skip_if`** to restrict social search to round 1 — every search
+> source runs each round. The `carry_forward` set no longer includes `decide_round.report`;
+> it carries `gaps`, `key_themes`, `coverage_score`, `urls_fetched`, `queries_used`,
+> `source_count`, and `collect_source_manifest.sources_manifest`. For the current stage
+> list, loop config, and carry-forward set, see `workflows/research-round.yaml`,
+> `workflows/research-analyst.yaml`, and the README. The IterResearch design rationale in
+> the sections below remains accurate.
+
 ---
 
 ## Table of Contents

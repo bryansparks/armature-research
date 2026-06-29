@@ -26,8 +26,8 @@ This release rewrites Research-Analyst as a production-grade **Armature workflow
 - **Iterative deep research** — runs 1–3 research rounds, carrying forward gaps, themes, and fetched URLs so each round targets what the previous round missed.
 - **Subagent delegation** — the core search/extract/synthesize cycle is isolated in `workflows/research-round.yaml` and invoked in a loop from the parent workflow.
 - **Multi-source search** — Tavily web search, Hacker News, Polymarket, and GitHub (free public APIs, no keys needed) plus optional Reddit discussions and YouTube transcripts. Each source degrades gracefully if unreachable.
-- **Recency filtering** — optionally constrain a run to a recent window (`recency=30d`, `3d`, `2mo`, `1y`) so queries, hard API filters, and report framing focus on the recent window.
-- **Engagement-weighted ranking** — every result carries a native engagement signal (HN points, GitHub stars, Polymarket volume, Reddit score, YouTube views) surfaced as badges in the report and used to weight synthesis.
+- **Recency filtering** — optionally constrain a run to a recent window (`recency=30d`, `3d`, `2mo`, `1y`) so queries, hard API filters, and report framing focus on the recent window. Every source honors it: Tavily `days` (web + YouTube), Reddit `time_filter`, and date cutoffs for Hacker News / Polymarket / GitHub.
+- **Engagement-weighted ranking** — every result carries a native engagement signal (HN points, GitHub stars, Polymarket volume, Reddit score, YouTube views) surfaced as badges in the report and used to weight synthesis. A non-LLM `collect_source_manifest` stage joins selected URLs with raw search results to attach `engagement_label` so badges render by design, not by accident, and the manifest accumulates across research rounds.
 - **Production reliability** — checkpoint/resume, cross-run source deduplication, continuation for incremental updates, cron/webhook triggers, and strict safety rules.
 - **Category-aware reports** — automatically formats output as product reviews, comparisons, how-to guides, fact-checks, or landscape briefings.
 - **Self-contained HTML reports** — dark/light theme, table of contents, collapsible sources, and print/export toolbar.
@@ -71,6 +71,7 @@ The `deep_research_round` stage in `workflows/research-analyst.yaml` delegates t
       - decide_round.urls_fetched
       - decide_round.queries_used
       - decide_round.source_count
+      - collect_source_manifest.sources_manifest
 ```
 
 Each research round performs a full `plan → search → select → fetch → extract → synthesize → decide` cycle. The `decide_round` stage returns a `continue_research` boolean plus a list of remaining gaps. If coverage is insufficient and the iteration cap hasn't been reached, Armature carries the selected keys forward and runs another round.
@@ -94,7 +95,7 @@ Research-Analyst is a production implementation of [Armature](https://github.com
 | Feature | Benefit to Research-Analyst |
 |---------|-----------------------------|
 | **Iterative loop with `carry_forward`** | Deepens coverage across 1–3 iterations, passing only the compressed state between rounds |
-| **Subagent delegation** | Research round runs as an isolated subagent with its own 10-stage pipeline |
+| **Subagent delegation** | Research round runs as an isolated subagent with its own 15-stage pipeline |
 | **Fan-out / Fan-in** | Parallel per-query search, per-URL fetch, per-source extraction |
 | **Model tier routing** | Cost-optimized routing (small for planning, large for extraction/synthesis) |
 | **Cross-run memory** | Remembers which URLs were already fetched across runs |
@@ -110,7 +111,7 @@ Research-Analyst is a production implementation of [Armature](https://github.com
 | Workflow | Purpose | Stages | Iterations |
 |---------|---------|--------|------------|
 | `workflows/research-analyst.yaml` | Deep research briefing | 6 (parent) | Up to 3 (subagent loop) |
-| `workflows/research-round.yaml` | Single research iteration (subagent) | 10 | 1 per loop iteration |
+| `workflows/research-round.yaml` | Single research iteration (subagent) | 15 | 1 per loop iteration |
 | `workflows/competitive-intel.yaml` | Competitive intelligence monitor | — | — |
 
 The parent workflow delegates to the subagent in a loop. Each iteration performs a full search→extract→synthesize→evaluate cycle. The loop continues until coverage is adequate or `max_iterations` (3) is reached.
@@ -189,7 +190,7 @@ armature run workflows/research-analyst.yaml \
 
 ### Recent Results (Recency Window)
 
-Constrain the run to a recent window. Queries are phrased "in the last N days," each source applies its native recency filter (Tavily `days`, PRAW `time_filter`, HN/Polymarket/GitHub date cutoffs), and the report frames findings as recent. Unset or invalid = open-ended (default behavior).
+Constrain the run to a recent window. Queries are phrased "in the last N days," each source applies its native recency filter (Tavily `days` for web and YouTube, PRAW `time_filter` for Reddit, date cutoffs for Hacker News / Polymarket / GitHub), and the report frames findings as recent. Unset or invalid = open-ended (default behavior).
 
 ```bash
 armature run workflows/research-analyst.yaml \
@@ -253,6 +254,7 @@ Written to `./research-output/<topic>_<run_id>.html`. Features:
 - Dark/light theme with aurora gradient hero section
 - Table of contents sidebar
 - Collapsible source list with credibility ratings
+- Engagement badges on community sources (★ GitHub stars, ▲ HN points · comments, $ Polymarket volume · odds, Reddit score · comments)
 - Category-specific formatting (product reviews, comparisons, how-to guides, etc.)
 - Print/export toolbar
 - Inline citations linking back to sources
@@ -283,14 +285,18 @@ research-analyst/
 │   └── tools/
 │       ├── web.py              # web_search, fetch_url, read_document, generate_html_report
 │       ├── social.py           # search_reddit, search_youtube_videos, fetch_youtube_transcript
+│       ├── communities.py      # search_hackernews, search_polymarket, search_github (+ engagement metrics)
+│       ├── engagement.py       # per-source engagement metric normalization
+│       ├── recency.py          # recency window parser + parse_recency tool
+│       ├── manifest.py         # build_source_manifest — joins selected URLs with engagement labels
 │       └── reporting.py        # Visual HTML report generator
 ├── workflows/
 │   ├── research-analyst.yaml  # Parent workflow (6 stages + iterative loop)
-│   ├── research-round.yaml    # Subagent workflow (10 stages per iteration)
+│   ├── research-round.yaml    # Subagent workflow (15 stages per iteration)
 │   └── competitive-intel.yaml  # Competitive intelligence monitor
 ├── tests/
-│   └── tools/
-│       └── test_web.py        # Tool handler unit tests
+│   ├── tools/                  # Handler unit tests (web, social, communities, engagement, recency, manifest, reporting)
+│   └── workflows/             # Structural + carry-forward contract tests
 ├── RESEARCH-MECHANICS.md      # Deep-dive into the iterative research design
 ├── .env.example               # API key template
 ├── pyproject.toml
@@ -312,7 +318,7 @@ model_tiers:
     model: qwen/qwen3.6-27b        # planning, source selection
   medium:
     provider: openrouter
-    model: moonshotai/kimi-k2.7    # orchestration, evaluation
+    model: moonshotai/kimi-k2.6    # orchestration, evaluation
   large:
     provider: openrouter
     model: z-ai/glm-5.2            # extraction, synthesis, writing
@@ -335,6 +341,7 @@ The `deep_research_round` stage runs the subagent in a loop:
       - decide_round.urls_fetched
       - decide_round.queries_used
       - decide_round.source_count
+      - collect_source_manifest.sources_manifest
 ```
 
 Each iteration receives carry-forward data from the previous one, enabling:
@@ -350,7 +357,7 @@ Each iteration receives carry-forward data from the previous one, enabling:
 | `carry_forward` | Which state survives between rounds (keep this minimal) |
 | `until` | Jinja2 expression that decides when to stop |
 
-For best results, do not carry forward raw search results or full fetched articles — only compressed state like `report`, `gaps`, `urls_fetched`, and `queries_used`.
+For best results, do not carry forward raw search results or full fetched articles — only compressed state like `gaps`, `urls_fetched`, `queries_used`, and `sources_manifest`. Carried dot-paths (e.g. `collect_source_manifest.sources_manifest`) are reachable in downstream stages as `{{ _iteration.carry_forward.<stage>.<key> }}`.
 
 ---
 
