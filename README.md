@@ -25,7 +25,9 @@ This release rewrites Research-Analyst as a production-grade **Armature workflow
 
 - **Iterative deep research** — runs 1–3 research rounds, carrying forward gaps, themes, and fetched URLs so each round targets what the previous round missed.
 - **Subagent delegation** — the core search/extract/synthesize cycle is isolated in `workflows/research-round.yaml` and invoked in a loop from the parent workflow.
-- **Multi-source search** — Tavily web search plus optional Reddit discussions and YouTube transcripts (social tools degrade gracefully if not configured).
+- **Multi-source search** — Tavily web search, Hacker News, Polymarket, and GitHub (free public APIs, no keys needed) plus optional Reddit discussions and YouTube transcripts. Each source degrades gracefully if unreachable.
+- **Recency filtering** — optionally constrain a run to a recent window (`recency=30d`, `3d`, `2mo`, `1y`) so queries, hard API filters, and report framing focus on the recent window.
+- **Engagement-weighted ranking** — every result carries a native engagement signal (HN points, GitHub stars, Polymarket volume, Reddit score, YouTube views) surfaced as badges in the report and used to weight synthesis.
 - **Production reliability** — checkpoint/resume, cross-run source deduplication, continuation for incremental updates, cron/webhook triggers, and strict safety rules.
 - **Category-aware reports** — automatically formats output as product reviews, comparisons, how-to guides, fact-checks, or landscape briefings.
 - **Self-contained HTML reports** — dark/light theme, table of contents, collapsible sources, and print/export toolbar.
@@ -38,7 +40,7 @@ A single command runs the full pipeline:
 
 1. **Decomposes** the topic into 5–8 specific sub-questions
 2. **Plans** targeted search queries for each sub-question
-3. **Searches** the web (Tavily), Reddit, and YouTube in parallel
+3. **Searches** the web (Tavily), Hacker News, Polymarket, GitHub, Reddit, and YouTube in parallel
 4. **Selects** the most valuable URLs from search results
 5. **Fetches** full content from each selected URL in parallel
 6. **Extracts** structured findings from each source
@@ -144,6 +146,8 @@ pip install research-analyst[social]
 
 This installs `praw` (Reddit) and `youtube-transcript-api` (YouTube transcripts). If these are missing, the workflow continues with web-only results.
 
+Hacker News, Polymarket, and GitHub search are built in and use free public APIs — no extra packages or keys required. An optional `GITHUB_TOKEN` env var raises GitHub rate limits (unauthenticated requests are limited to ~10/min); without it, GitHub search degrades gracefully and the run continues.
+
 ### API Keys
 
 Copy `.env.example` to `.env` and add your keys:
@@ -183,6 +187,18 @@ armature run workflows/research-analyst.yaml \
   --input "focus=how does the EU AI Act affect open-source LLM providers?"
 ```
 
+### Recent Results (Recency Window)
+
+Constrain the run to a recent window. Queries are phrased "in the last N days," each source applies its native recency filter (Tavily `days`, PRAW `time_filter`, HN/Polymarket/GitHub date cutoffs), and the report frames findings as recent. Unset or invalid = open-ended (default behavior).
+
+```bash
+armature run workflows/research-analyst.yaml \
+  --input "topic=GLM-5.2 reception" \
+  --input "recency=30d"
+```
+
+Supported formats: `Nd` (days), `Nmo` (months, ×30), `Ny` (years, ×365), bare `N` (days). Example values: `3d`, `30d`, `2mo`, `90d`, `1y`.
+
 ### Force Fresh Run (Clear Checkpoint)
 
 ```bash
@@ -208,6 +224,7 @@ armature run workflows/research-analyst.yaml --input "topic=AI regulation"
 |-------|----------|-------------|
 | `topic` | ✅ | The research question or subject area |
 | `focus` | — | Optional angle or constraint, e.g. `focus=regulatory implications` |
+| `recency` | — | Recent-results window, e.g. `recency=30d` (`Nd`, `Nmo`, `Ny`, bare `N`). Unset = open-ended |
 | `documents` | — | Comma-separated local file paths to include as sources |
 | `max_sources` | — | Cap on URLs fetched per round (default: 12) |
 
