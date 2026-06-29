@@ -244,6 +244,7 @@ stages:
         - decide_round.urls_fetched
         - decide_round.queries_used
         - decide_round.source_count
+        - collect_source_manifest.sources_manifest
       iteration_var: _iteration
     output_max_chars: 50000
 
@@ -499,7 +500,7 @@ stages:
         topic: "{{ topic or Topic or '' }}"
         markdown: "{{ write_report.report }}"
         run_id: "{{ run_id }}"
-        sources: "{{ deep_research_round.decide_round.urls_fetched }}"
+        sources: "{{ deep_research_round.collect_source_manifest.sources_manifest }}"
         source_count: "{{ deep_research_round.decide_round.source_count }}"
         queries_used: "{{ deep_research_round.decide_round.queries_used }}"
         rounds: "{{ deep_research_round.decide_round.iteration_num }}"

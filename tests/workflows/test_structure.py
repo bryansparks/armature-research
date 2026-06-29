@@ -77,3 +77,19 @@ def test_round_declares_sources_manifest_input():
 def test_analyst_declares_recency_input():
     names = [i["name"] for i in _load(ANALYST)["contracts"]["inputs"]]
     assert "recency" in names
+
+
+def test_analyst_carries_sources_manifest():
+    spec = _load(ANALYST)
+    stage = next(s for s in spec["stages"] if s["id"] == "deep_research_round")
+    carry = stage["loop"]["carry_forward"]
+    assert "collect_source_manifest.sources_manifest" in carry
+
+
+def test_generate_html_sources_bound_to_manifest():
+    spec = _load(ANALYST)
+    stage = next(s for s in spec["stages"] if s["id"] == "generate_html")
+    sources_arg = stage["tool_call"]["args"]["sources"]
+    assert "collect_source_manifest.sources_manifest" in sources_arg
+    # The old compressed binding is gone.
+    assert "decide_round.urls_fetched" not in sources_arg
