@@ -80,3 +80,104 @@ def _iter_engagement_items(payload: Any) -> Iterator[tuple[str, str]]:
                         yield str(url), str(label)
         elif entry.get("url") and entry.get("engagement_label"):
             yield str(entry["url"]), str(entry["engagement_label"])
+
+
+from armature.permissions.permissions import PermissionLevel
+from armature.registry.registry import ToolDescriptor, ToolRegistry  # noqa: F401
+
+
+async def _handle_build_source_manifest(args: dict[str, Any]) -> dict[str, Any]:
+    """Join selected source URLs with raw search-tool results to build a source
+    manifest carrying engagement labels for the HTML report. Accumulates across
+    research rounds via `prior_manifest`. Never raises; garbled inputs degrade
+    to empty lists and a tool failure can never crash a research run.
+    """
+    try:
+        selected = _parse_list(args.get("selected_urls"))
+        prior = _parse_list(args.get("prior_manifest"))
+
+        # Build a normalized-URL -> engagement_label index from every raw result list.
+        index: dict[str, str] = {}
+        for key in ("web_results", "hn_results", "polymarket_results",
+                    "github_results", "reddit_results", "youtube_results"):
+            for url, label in _iter_engagement_items(_parse_list(args.get(key))):
+                index.setdefault(_normalize_url(url), label)
+
+        manifest: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        # Seed with the prior manifest (already enriched in previous rounds).
+        for entry in prior:
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get("url")
+            if not url:
+                continue
+            nkey = _normalize_url(url)
+            if nkey in seen:
+                continue
+            seen.add(nkey)
+            manifest.append({
+                "url": url,
+                "title": entry.get("title") or url,
+                "engagement_label": entry.get("engagement_label"),
+                "image": entry.get("image"),
+            })
+
+        # Append this round's selected URLs, enriching engagement from the index.
+        for sel in selected:
+            if not isinstance(sel, dict):
+                continue
+            url = sel.get("url")
+            if not url:
+                continue
+            nkey = _normalize_url(url)
+            if nkey in seen:
+                continue
+            seen.add(nkey)
+            manifest.append({
+                "url": url,
+                "title": sel.get("title") or url,
+                "engagement_label": index.get(nkey),
+                "image": sel.get("image"),
+            })
+
+        return {"sources_manifest": manifest, "count": len(manifest), "error": None}
+    except Exception as exc:
+        # Best-effort fallback: selected URLs without engagement if anything blew up.
+        fallback: list[dict[str, Any]] = []
+        for sel in _parse_list(args.get("selected_urls")):
+            if isinstance(sel, dict) and sel.get("url"):
+                fallback.append({
+                    "url": sel["url"],
+                    "title": sel.get("title") or sel["url"],
+                    "engagement_label": None,
+                    "image": sel.get("image"),
+                })
+        return {"sources_manifest": fallback, "count": len(fallback), "error": str(exc)}
+
+
+def register(registry: ToolRegistry) -> None:
+    """Register the source-manifest builder tool."""
+    registry.register(ToolDescriptor(
+        name="build_source_manifest",
+        description=(
+            "Join selected source URLs with raw search-tool results to build a "
+            "source manifest carrying engagement labels for the HTML report's "
+            "Sources panel. Accumulates across research rounds via prior_manifest. "
+            "Never raises; garbled inputs degrade to empty lists. Returns "
+            "{sources_manifest: [{url, title, engagement_label?, image?}], count, error?}."
+        ),
+        permission=PermissionLevel.READ_ONLY,
+        handler=_handle_build_source_manifest,
+        parameters={
+            "selected_urls":      {"type": "string", "description": "Selected URL objects [{url, title, image?}] (Jinja-rendered list)"},
+            "prior_manifest":     {"type": "string", "description": "Carried-forward manifest from the prior round (empty on round 1)"},
+            "web_results":        {"type": "string", "description": "Tavily web search results (no engagement labels)"},
+            "hn_results":         {"type": "string", "description": "Hacker News search results"},
+            "polymarket_results": {"type": "string", "description": "Polymarket search results"},
+            "github_results":     {"type": "string", "description": "GitHub search results"},
+            "reddit_results":     {"type": "string", "description": "Reddit search results"},
+            "youtube_results":    {"type": "string", "description": "YouTube transcript results"},
+        },
+    ))
