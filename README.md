@@ -10,8 +10,10 @@
 > **Example Project:** Research-Analyst is a reference implementation demonstrating [Armature](https://github.com/bryansparks/armature), a YAML-configured agentic workflow harness. Use this repo as a template for building your own Armature-based applications.
 
 ```bash
-# Install from PyPI
-pip install research-analyst
+# Install from source (not yet on PyPI — see Installation below)
+git clone https://github.com/bryansparks/armature-research
+cd armature-research
+pip install -e ".[dev]"
 
 # Run a research task
 armature run workflows/research-analyst.yaml --input "topic=AI regulation in the EU"
@@ -120,29 +122,27 @@ The parent workflow delegates to the subagent in a loop. Each iteration performs
 
 ## Installation
 
-The recommended way to install is from PyPI:
+Research-Analyst is **not yet published on PyPI** (planned). Install from source:
 
 ```bash
-pip install research-analyst
+git clone https://github.com/bryansparks/armature-research
+cd armature-research
+pip install -e ".[dev]"
 ```
 
-This pulls in the `armature` runtime and bundled workflow specs automatically.
-
-> **Built on Armature:** Research-Analyst runs on the [Armature](https://github.com/bryansparks/armature) agentic harness. You don't need to install it separately — `pip` resolves it as a dependency, along with the bundled `research-analyst` and `research-round` workflow specs that define the research pipeline.
-
-### From source (for development)
-
-```bash
-git clone https://github.com/bryansparks/research-analyst
-pip install -e "research-analyst/[dev]"
-```
+> **Armature prerequisite:** Research-Analyst runs on the [Armature](https://github.com/bryansparks/armature) agentic harness, which is also installed from source (it is not yet on PyPI under this name). Install Armature first, then Research-Analyst:
+> ```bash
+> git clone https://github.com/bryansparks/armature
+> pip install -e ./armature
+> ```
+> The `research-analyst.yaml` and `research-round.yaml` workflow specs that define the pipeline ship inside this repo under `workflows/`.
 
 ### Optional social sources
 
 To enable Reddit and YouTube research, install the social extras:
 
 ```bash
-pip install research-analyst[social]
+pip install -e ".[social]"
 ```
 
 This installs `praw` (Reddit) and `youtube-transcript-api` (YouTube transcripts). If these are missing, the workflow continues with web-only results.
@@ -280,7 +280,7 @@ The validated Markdown report is available in the run output and is used as the 
 ## Project Structure
 
 ```
-research-analyst/
+armature-research/
 ├── research/
 │   └── tools/
 │       ├── web.py              # web_search, fetch_url, read_document, generate_html_report

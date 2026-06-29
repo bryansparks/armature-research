@@ -6,12 +6,12 @@ Exposes three tools to the Armature workflow:
   fetch_youtube_transcript — extract transcript from a YouTube video (no API key needed)
 
 Optional setup — tools degrade gracefully if not configured:
-  Reddit:  pip install praw  (or: pip install 'research-analyst[social]')
+  Reddit:  pip install praw  (or: pip install 'armature-research[social]')
            Set REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET in .env
            Create a Reddit app at: https://www.reddit.com/prefs/apps
            Choose "script" app type; redirect URI can be http://localhost:8080
 
-  YouTube: pip install youtube-transcript-api  (or: pip install 'research-analyst[social]')
+  YouTube: pip install youtube-transcript-api  (or: pip install 'armature-research[social]')
            No API key required — works on any public video with captions enabled.
            search_youtube_videos reuses the existing TAVILY_API_KEY for video discovery.
 
@@ -50,7 +50,7 @@ def _reddit_client():
     except ImportError as exc:
         raise RuntimeError(
             "praw is not installed. "
-            "Run: pip install praw  (or: pip install 'research-analyst[social]')"
+            "Run: pip install praw  (or: pip install 'armature-research[social]')"
         ) from exc
     client_id = os.environ.get("REDDIT_CLIENT_ID", "")
     client_secret = os.environ.get("REDDIT_CLIENT_SECRET", "")
@@ -267,7 +267,7 @@ async def _handle_fetch_youtube_transcript(args: dict[str, Any]) -> dict[str, An
             "error": (
                 "youtube-transcript-api is not installed. "
                 "Run: pip install youtube-transcript-api  "
-                "(or: pip install 'research-analyst[social]')"
+                "(or: pip install 'armature-research[social]')"
             ),
         }
     except Exception as exc:

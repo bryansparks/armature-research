@@ -1,5 +1,5 @@
 [project]
-name = "research-analyst"
+name = "armature-research"
 version = "0.1.0"
 description = "Deep-dive research analyst powered by Armature — showcases fan-out, continuation, triggers, and structured output"
 requires-python = ">=3.11"
