@@ -1,0 +1,108 @@
+"""Structural tests: research-round.yaml and research-analyst.yaml wiring for
+recency + community sources."""
+import pathlib
+import yaml
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROUND = ROOT / "workflows" / "research-round.yaml"
+ANALYST = ROOT / "workflows" / "research-analyst.yaml"
+
+
+def _load(path):
+    return yaml.safe_load(path.read_text())
+
+
+# ── research-round.yaml ────────────────────────────────────────────────────────
+
+def test_round_registers_community_and_recency_modules():
+    spec = _load(ROUND)
+    modules = [t["module"] for t in spec["tools"]]
+    assert "research.tools.communities" in modules
+    assert "research.tools.recency" in modules
+
+
+def test_round_declares_recency_input():
+    names = [i["name"] for i in _load(ROUND)["contracts"]["inputs"]]
+    assert "recency" in names
+
+
+def test_round_has_prepare_recency_and_new_search_stages():
+    ids = [s["id"] for s in _load(ROUND)["stages"]]
+    for sid in ("prepare_recency", "run_hn_search", "run_polymarket_search", "run_github_search"):
+        assert sid in ids, f"missing stage {sid}"
+
+
+def test_select_sources_depends_on_new_stages():
+    spec = _load(ROUND)
+    stage = next(s for s in spec["stages"] if s["id"] == "select_sources")
+    deps = stage["depends_on"]
+    for sid in ("run_hn_search", "run_polymarket_search", "run_github_search"):
+        assert sid in deps, f"select_sources missing dep {sid}"
+
+
+def test_round_registers_manifest_module():
+    spec = _load(ROUND)
+    modules = [t["module"] for t in spec["tools"]]
+    assert "research.tools.manifest" in modules
+
+
+def test_round_has_collect_source_manifest_stage():
+    ids = [s["id"] for s in _load(ROUND)["stages"]]
+    assert "collect_source_manifest" in ids
+
+
+def test_collect_source_manifest_depends_on_select_and_searches():
+    spec = _load(ROUND)
+    stage = next(s for s in spec["stages"] if s["id"] == "collect_source_manifest")
+    deps = stage["depends_on"]
+    for sid in ("select_sources", "run_searches", "run_hn_search",
+                "run_polymarket_search", "run_github_search",
+                "run_reddit_search", "fetch_youtube_transcripts"):
+        assert sid in deps, f"collect_source_manifest missing dep {sid}"
+
+
+def test_collect_source_manifest_calls_build_source_manifest():
+    spec = _load(ROUND)
+    stage = next(s for s in spec["stages"] if s["id"] == "collect_source_manifest")
+    assert stage["tool_call"]["name"] == "build_source_manifest"
+
+
+def test_collect_source_manifest_prior_manifest_uses_carry_forward_path():
+    """prior_manifest must read the carried manifest via _iteration.carry_forward.
+    Dot-path carry (collect_source_manifest.sources_manifest) nests under
+    _iteration.carry_forward; a bare {{ sources_manifest }} does NOT resolve
+    (only carry_forward: None / whole-result carry flattens to top level). See
+    tests/workflows/test_carry_forward_contract.py for the mechanism proof."""
+    spec = _load(ROUND)
+    stage = next(s for s in spec["stages"] if s["id"] == "collect_source_manifest")
+    prior = stage["tool_call"]["args"]["prior_manifest"]
+    assert "_iteration.carry_forward.collect_source_manifest.sources_manifest" in prior
+    assert "{{ sources_manifest }}" not in prior  # bare ref does not resolve
+
+
+def test_round_declares_sources_manifest_input():
+    names = [i["name"] for i in _load(ROUND)["contracts"]["inputs"]]
+    assert "sources_manifest" in names
+
+
+# ── research-analyst.yaml ──────────────────────────────────────────────────────
+
+def test_analyst_declares_recency_input():
+    names = [i["name"] for i in _load(ANALYST)["contracts"]["inputs"]]
+    assert "recency" in names
+
+
+def test_analyst_carries_sources_manifest():
+    spec = _load(ANALYST)
+    stage = next(s for s in spec["stages"] if s["id"] == "deep_research_round")
+    carry = stage["loop"]["carry_forward"]
+    assert "collect_source_manifest.sources_manifest" in carry
+
+
+def test_generate_html_sources_bound_to_manifest():
+    spec = _load(ANALYST)
+    stage = next(s for s in spec["stages"] if s["id"] == "generate_html")
+    sources_arg = stage["tool_call"]["args"]["sources"]
+    assert "collect_source_manifest.sources_manifest" in sources_arg
+    # The old compressed binding is gone.
+    assert "decide_round.urls_fetched" not in sources_arg

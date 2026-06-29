@@ -36,6 +36,7 @@ contracts:
   inputs:
     - name: topic              # From parent context
     - name: focus              # From parent context (optional)
+    - name: recency            # Optional: recent-results window, e.g. "30d", "3d", "2mo". Unset = open-ended.
     - name: decompose_query    # From parent context (parent's stage output)
     - name: max_sources         # From parent context (optional)
     - name: run_id              # From parent context (injected by harness)
@@ -48,6 +49,7 @@ contracts:
     - name: urls_fetched       # Carry-forward: URLs already fetched (for deduplication)
     - name: queries_used       # Carry-forward: queries already used (to avoid repetition)
     - name: source_count       # Carry-forward: running total of sources consulted
+    - name: sources_manifest   # Carry-forward: enriched source manifest from previous iteration
   max_iterations: 10
   max_llm_calls: 80
   timeout_hours: 0.5
@@ -73,6 +75,9 @@ contracts:
 tools:
   - module: research.tools.web
   - module: research.tools.social
+  - module: research.tools.communities
+  - module: research.tools.recency
+  - module: research.tools.manifest
 
 # ── Stages ──────────────────────────────────────────────────────────────────────────
 
@@ -82,6 +87,7 @@ stages:
   # On iteration 2+: generates targeted gap-filling queries based on coverage gaps
   # from the previous iteration's decide_round evaluation.
   - id: plan_round_queries
+    depends_on: [prepare_recency]
     signature:
       input:
         topic: The research topic
@@ -122,6 +128,8 @@ stages:
         Avoid queries so broad they return only aggregator pages.
         Prefer specific noun phrases over conversational questions.
 
+        {% if prepare_recency.phrase %}Append "{{ prepare_recency.phrase }}" to each search query so engines bias toward recent content.{% endif %}
+
         You MUST output a JSON object with exactly one key "queries", whose value is
         an array of objects. Each object must have three keys: "query" (a search string),
         "sub_question_index" (an integer starting from 1), and "intent" (what the query
@@ -142,9 +150,74 @@ stages:
               sub_question_index:   {type: number}
               intent:               {type: string}
 
+  # ── 1b. Parse the recency window into structured values for downstream filters ──
+  # Returns {days, phrase, iso_start} (zeros/empty when recency unset).
+  - id: prepare_recency
+    tool_call:
+      name: parse_recency
+      args:
+        recency: "{{ recency | default('') }}"
+
+  # ── 2a. Search Hacker News for developer sentiment ───────────────────────────
+  # HN surfaces practitioner reactions and early signal that press coverage lags.
+  - id: run_hn_search
+    depends_on: [plan_round_queries, prepare_recency]
+    fan_out: 4
+    fan_in: list
+    fail_as_value: true
+    partition_source: "{{ plan_round_queries.queries }}"
+    partition_key: query_item
+    signature:
+      input:
+        query_item: Search query object with query string and intent
+    tool_call:
+      name: search_hackernews
+      args:
+        query: "{{ query_item.query }}"
+        max_results: 3
+        recency_iso: "{{ prepare_recency.iso_start }}"
+
+  # ── 2b. Search Polymarket for crowd/money-backed forecasts ───────────────────
+  # Prediction-market odds are a real-money signal of what people expect to happen.
+  - id: run_polymarket_search
+    depends_on: [plan_round_queries, prepare_recency]
+    fan_out: 4
+    fan_in: list
+    fail_as_value: true
+    partition_source: "{{ plan_round_queries.queries }}"
+    partition_key: query_item
+    signature:
+      input:
+        query_item: Search query object with query string and intent
+    tool_call:
+      name: search_polymarket
+      args:
+        query: "{{ query_item.query }}"
+        max_results: 3
+        recency_iso: "{{ prepare_recency.iso_start }}"
+
+  # ── 2c. Search GitHub for projects and traction ─────────────────────────────
+  # Stars and recent activity signal real adoption and where a field is moving.
+  - id: run_github_search
+    depends_on: [plan_round_queries, prepare_recency]
+    fan_out: 4
+    fan_in: list
+    fail_as_value: true
+    partition_source: "{{ plan_round_queries.queries }}"
+    partition_key: query_item
+    signature:
+      input:
+        query_item: Search query object with query string and intent
+    tool_call:
+      name: search_github
+      args:
+        query: "{{ query_item.query }}"
+        max_results: 3
+        recency_iso: "{{ prepare_recency.iso_start }}"
+
   # ── 2. Execute all searches in parallel ────────────────────────────────────────────
   - id: run_searches
-    depends_on: [plan_round_queries]
+    depends_on: [plan_round_queries, prepare_recency]
     fan_out: 12
     fan_in: list
     partition_source: "{{ plan_round_queries.queries }}"
@@ -157,12 +230,13 @@ stages:
       args:
         query: "{{ search_item.query }}"
         max_results: 5
+        recency_days: "{{ prepare_recency.days }}"
 
   # ── 2b. Search Reddit for discussions ────────────────────────────────────────────
   # Reddit surfaces real user experiences, "X vs Y" comparisons, and candid reviews
   # that formal press coverage omits.
   - id: run_reddit_search
-    depends_on: [plan_round_queries]
+    depends_on: [plan_round_queries, prepare_recency]
     fan_out: 4
     fan_in: list
     fail_as_value: true
@@ -177,11 +251,12 @@ stages:
         query: "{{ query_item.query }}"
         max_results: 3
         sort: relevance
+        recency_days: "{{ prepare_recency.days }}"
 
   # ── 2c. Search YouTube for video content ─────────────────────────────────────────
   # Product demos, keynotes, and conference talks reveal how products work in practice.
   - id: run_youtube_search
-    depends_on: [plan_round_queries]
+    depends_on: [plan_round_queries, prepare_recency]
     fail_as_value: true
     tool_call:
       name: search_youtube_videos
@@ -189,6 +264,7 @@ stages:
         queries: "{{ plan_round_queries.queries }}"
         max_per_query: 1
         max_total: 3
+        recency_days: "{{ prepare_recency.days }}"
 
   # ── 2d. Fetch YouTube transcripts ─────────────────────────────────────────────────
   - id: fetch_youtube_transcripts
@@ -209,11 +285,14 @@ stages:
 
   # ── 3. Select the most valuable URLs to read in full ─────────────────────────────
   - id: select_sources
-    depends_on: [run_searches, run_reddit_search, fetch_youtube_transcripts]
+    depends_on: [run_searches, run_reddit_search, fetch_youtube_transcripts, run_hn_search, run_polymarket_search, run_github_search]
     signature:
       input:
         topic: The research topic
         run_searches: All search results — list of per-query results
+        run_hn_search: Hacker News stories (each item has query + results array; empty means no matches)
+        run_polymarket_search: Polymarket prediction markets (each item has query + results array; empty means no matches)
+        run_github_search: GitHub repositories (each item has query + results array; empty means no matches)
         decompose_query: Sub-questions for coverage checking
     role:
       name: SourceSelector
@@ -234,6 +313,12 @@ stages:
         YouTube video transcripts: {{ fetch_youtube_transcripts }}
         Use video transcripts for product demos, keynotes, and conference talks.
         {% endif %}
+
+        Hacker News: {{ run_hn_search }} — developer sentiment and early signal; weight high-point, high-comment stories.
+        Polymarket: {{ run_polymarket_search }} — real-money forecasts; weight high-volume markets and cite the odds.
+        GitHub: {{ run_github_search }} — projects and traction; weight high-star repos with recent activity.
+        Rank sources by real engagement signals (upvotes, stars, volume, views), not editor placement.
+        {% if prepare_recency.phrase %}Constrain findings to content {{ prepare_recency.phrase }}.{% endif %}
 
         Topic: {{ topic or Topic }}
         Sub-questions to cover: {{ decompose_query.sub_questions }}
@@ -277,6 +362,31 @@ stages:
               credibility_note:   {type: string}
               image:              {type: string, description: "Thumbnail image URL from search result, if available"}
         coverage_note: {type: string}
+
+  # ── 3b. Build an enriched source manifest (engagement labels) for the report ──
+  # Non-LLM tool call: joins select_sources.selected_urls with the raw search
+  # results by normalized URL to attach engagement_label, and accumulates the
+  # manifest across rounds via the carried-forward
+  # {{ _iteration.carry_forward.collect_source_manifest.sources_manifest }}
+  # (dot-path carry nests under _iteration.carry_forward; a bare top-level
+  # reference does not resolve — see tests/workflows/test_carry_forward_contract.py).
+  # Never raises; a tool error degrades to a smaller/empty manifest.
+  - id: collect_source_manifest
+    depends_on:
+      [select_sources, run_searches, run_hn_search, run_polymarket_search,
+       run_github_search, run_reddit_search, fetch_youtube_transcripts]
+    fail_as_value: true
+    tool_call:
+      name: build_source_manifest
+      args:
+        selected_urls:      "{{ select_sources.selected_urls }}"
+        prior_manifest:     "{{ _iteration.carry_forward.collect_source_manifest.sources_manifest }}"
+        web_results:        "{{ run_searches }}"
+        hn_results:         "{{ run_hn_search }}"
+        polymarket_results: "{{ run_polymarket_search }}"
+        github_results:     "{{ run_github_search }}"
+        reddit_results:     "{{ run_reddit_search }}"
+        youtube_results:    "{{ fetch_youtube_transcripts }}"
 
   # ── 4. Fetch full content of each selected URL in parallel ────────────────────────
   - id: fetch_articles
@@ -381,6 +491,9 @@ stages:
         focus: Optional focus constraint
         decompose_query: Sub-questions, scope, and success criteria
         extract_findings: Per-source extracted findings from web articles
+        run_hn_search: Hacker News stories (each item has query + results array; empty means no matches)
+        run_polymarket_search: Polymarket prediction markets (each item has query + results array; empty means no matches)
+        run_github_search: GitHub repositories (each item has query + results array; empty means no matches)
     role:
       name: Synthesizer
       type: orchestrator
@@ -393,6 +506,12 @@ stages:
         Sub-questions: {{ decompose_query.sub_questions }}
 
         Web source findings: {{ extract_findings }}
+
+        Hacker News: {{ run_hn_search }} — developer sentiment and early signal; weight high-point, high-comment stories.
+        Polymarket: {{ run_polymarket_search }} — real-money forecasts; weight high-volume markets and cite the odds.
+        GitHub: {{ run_github_search }} — projects and traction; weight high-star repos with recent activity.
+        Rank sources by real engagement signals (upvotes, stars, volume, views), not editor placement.
+        {% if prepare_recency.phrase %}Constrain findings to content {{ prepare_recency.phrase }}.{% endif %}
 
         {% if _iteration is defined and not _iteration.is_first and key_themes is defined %}
         PREVIOUS ITERATION CONTEXT (iteration {{ _iteration.num }}):

@@ -255,3 +255,74 @@ async def test_fetch_youtube_transcript_api_error_returns_error_dict():
         )
     assert result["transcript"] == ""
     assert "TranscriptsDisabled" in result["error"]
+
+
+# ── recency + engagement ───────────────────────────────────────────────────────
+
+def test_reddit_time_filter_mapping():
+    from research.tools.social import _reddit_time_filter
+    assert _reddit_time_filter(1) == "day"
+    assert _reddit_time_filter(7) == "week"
+    assert _reddit_time_filter(30) == "month"
+    assert _reddit_time_filter(365) == "year"
+    assert _reddit_time_filter(None) == "all"
+    assert _reddit_time_filter("garbage") == "all"
+
+
+async def test_search_reddit_passes_time_filter(monkeypatch):
+    from unittest.mock import MagicMock
+    monkeypatch.delenv("REDDIT_CLIENT_ID", raising=False)
+    monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
+    reddit = MagicMock()
+    subreddit = MagicMock()
+    subreddit.search.return_value = iter([])
+    reddit.subreddit.return_value = subreddit
+    with patch("research.tools.social._reddit_client", return_value=reddit):
+        from research.tools.social import _handle_search_reddit
+        await _handle_search_reddit({"query": "ai", "recency_days": 30})
+    assert subreddit.search.call_args.kwargs.get("time_filter") == "month"
+
+
+async def test_search_reddit_omits_time_filter_when_unset(monkeypatch):
+    from unittest.mock import MagicMock
+    reddit = MagicMock()
+    subreddit = MagicMock()
+    subreddit.search.return_value = iter([])
+    reddit.subreddit.return_value = subreddit
+    with patch("research.tools.social._reddit_client", return_value=reddit):
+        from research.tools.social import _handle_search_reddit
+        await _handle_search_reddit({"query": "ai"})
+    assert "time_filter" not in subreddit.search.call_args.kwargs
+
+
+async def test_search_reddit_attaches_engagement_fields():
+    from unittest.mock import MagicMock
+    sub = MagicMock()
+    sub.permalink = "/r/x/comments/1/p"
+    sub.title = "T"
+    sub.subreddit.display_name = "x"
+    sub.score = 1200
+    sub.num_comments = 90
+    sub.selftext = ""
+    sub.created_utc = 1700000000
+    subreddit = MagicMock()
+    subreddit.search.return_value = iter([sub])
+    reddit = MagicMock()
+    reddit.subreddit.return_value = subreddit
+    with patch("research.tools.social._reddit_client", return_value=reddit):
+        from research.tools.social import _handle_search_reddit
+        result = await _handle_search_reddit({"query": "ai"})
+    r = result["results"][0]
+    assert r["source_type"] == "reddit"
+    assert 0.0 < r["engagement_score"] <= 1.0
+    assert "1200" in r["engagement_label"]
+
+
+async def test_search_youtube_forwards_recency_days(monkeypatch):
+    from unittest.mock import MagicMock
+    fake_client = MagicMock()
+    fake_client.search.return_value = {"results": []}
+    monkeypatch.setattr("research.tools.social._tavily_client", lambda: fake_client)
+    from research.tools.social import _handle_search_youtube_videos
+    await _handle_search_youtube_videos({"queries": ["ai"], "recency_days": 30})
+    assert fake_client.search.call_args.kwargs.get("days") == 30

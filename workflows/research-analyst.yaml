@@ -20,7 +20,7 @@ model_tiers:
 
   medium:
     provider: openrouter
-    model: moonshotai/kimi-k2.7
+    model: moonshotai/kimi-k2.6
     api_key_env: OPENROUTER_API_KEY
     temperature: 0.2
     max_tokens: 8192
@@ -58,6 +58,7 @@ contracts:
   inputs:
     - name: topic          # The research question or subject area (required)
     - name: focus          # Optional: specific angle or constraint ("focus on regulatory implications")
+    - name: recency        # Optional: recent-results window, e.g. "30d", "3d", "2mo". Unset = open-ended.
     - name: documents      # Optional: list of local file paths to include as sources
     - name: max_sources    # Optional: cap on URLs fetched (default 12)
     - name: run_id         # Injected by the harness at runtime
@@ -243,6 +244,7 @@ stages:
         - decide_round.urls_fetched
         - decide_round.queries_used
         - decide_round.source_count
+        - collect_source_manifest.sources_manifest
       iteration_var: _iteration
     output_max_chars: 50000
 
@@ -276,6 +278,7 @@ stages:
 
         Topic: {{ topic or Topic }}
         {% if focus %}Focus: {{ focus }}{% endif %}
+        {% if recency %}Recency window requested: {{ recency }}. Frame findings as recent and note the window in the report's scope note.{% endif %}
         Run ID: {{ run_id }}
 
         The research synthesis is in deep_research_round.decide_round.report.
@@ -497,7 +500,7 @@ stages:
         topic: "{{ topic or Topic or '' }}"
         markdown: "{{ write_report.report }}"
         run_id: "{{ run_id }}"
-        sources: "{{ deep_research_round.decide_round.urls_fetched }}"
+        sources: "{{ deep_research_round.collect_source_manifest.sources_manifest }}"
         source_count: "{{ deep_research_round.decide_round.source_count }}"
         queries_used: "{{ deep_research_round.decide_round.queries_used }}"
         rounds: "{{ deep_research_round.decide_round.iteration_num }}"
