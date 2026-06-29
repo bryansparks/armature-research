@@ -20,7 +20,7 @@ model_tiers:
 
   medium:
     provider: openrouter
-    model: moonshotai/kimi-k2.7
+    model: moonshotai/kimi-k2.6
     api_key_env: OPENROUTER_API_KEY
     temperature: 0.2
     max_tokens: 8192
