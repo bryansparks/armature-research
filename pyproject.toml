@@ -2,9 +2,10 @@
 name = "armature-research"
 version = "0.1.0"
 description = "Deep-dive research analyst powered by Armature — showcases fan-out, continuation, triggers, and structured output"
+readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-    { name = "Bryan Sparks", email = "bryan@drycanyon.com" },
+    { name = "Bryan Sparks", email = "bryan@elftech.ai" },
 ]
 dependencies = [
     "armature>=0.2.0",
