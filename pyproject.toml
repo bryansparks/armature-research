@@ -1,6 +1,6 @@
 [project]
 name = "armature-research"
-version = "0.1.0"
+version = "0.1.1"
 description = "Deep-dive research analyst powered by Armature — showcases fan-out, continuation, triggers, and structured output"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,7 +8,7 @@ authors = [
     { name = "Bryan Sparks", email = "bryan@elftech.ai" },
 ]
 dependencies = [
-    "armature>=0.2.0",
+    "armature-agents>=0.4.0",   # provides the `armature` import package
     "tavily-python>=0.5",   # web search + URL extraction (set TAVILY_API_KEY)
     "python-dotenv>=1.0",   # loads TAVILY_API_KEY and OPENROUTER_API_KEY from .env
     "markdown>=3.5",        # HTML report rendering
